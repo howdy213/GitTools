@@ -1,0 +1,2969 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub文件批量下载器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.bootcss.com/font-awesome/5.13.0/css/all.css" rel="stylesheet">
+    <!-- 引入JSZip库用于客户端ZIP打包 -->
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js  "></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#2563eb',
+                        success: '#10b981',
+                        warning: '#f59e0b',
+                        danger: '#ef4444',
+                    }
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .tree-item {
+                @apply flex items-center py-1 px-2 rounded hover:bg-gray-100 transition-colors;
+            }
+
+            .tree-item-selected {
+                @apply bg-blue-50 text-primary font-medium;
+            }
+
+            .progress-container {
+                @apply h-2 bg-gray-200 rounded-full overflow-hidden;
+            }
+
+            .progress-bar {
+                @apply h-full bg-primary transition-all duration-300;
+            }
+
+            .history-item {
+                @apply px-4 py-2 hover:bg-gray-100 cursor-pointer transition-colors flex justify-between items-center;
+            }
+
+            .directory-expander {
+                @apply w-5 h-5 flex items-center justify-center mr-1 cursor-pointer text-gray-500;
+            }
+
+            .path-display {
+                @apply text-sm bg-gray-100 p-2 rounded truncate;
+            }
+
+            .file-progress-item {
+                @apply text-xs text-gray-600 py-1 border-b border-gray-100 flex justify-between items-center;
+            }
+
+            .file-size {
+                @apply text-xs text-gray-500 ml-auto pl-2;
+            }
+
+            .browser-support-message {
+                @apply bg-yellow-50 border-l-4 border-warning p-3 text-sm text-yellow-800 mb-4 hidden;
+            }
+
+            .mirror-info-tooltip {
+                @apply absolute bg-gray-800 text-white text-xs rounded p-2 w-64 z-50 transition-all duration-200 pointer-events-none;
+                opacity: 0.0;
+            }
+
+            .mirror-option {
+                @apply flex items-center mr-6 mb-2;
+            }
+
+            .custom-checkbox {
+                @apply appearance-none w-4 h-4 border-2 border-gray-300 rounded text-primary focus:outline-none focus:ring-1 focus:ring-primary relative cursor-pointer;
+            }
+
+                .custom-checkbox:checked {
+                    @apply bg-primary border-primary;
+                }
+
+                    .custom-checkbox:checked::after {
+                        content: "✓";
+                        @apply absolute text-white text-xs left-1/2 top-1/2 transform -translate-x-1/2 -translate-y-1/2;
+                    }
+
+                .custom-checkbox:indeterminate {
+                    @apply bg-primary border-primary;
+                }
+
+                    .custom-checkbox:indeterminate::after {
+                        content: "−";
+                        @apply absolute text-white text-xs left-1/2 top-1/2 transform -translate-x-1/2 -translate-y-1/2;
+                    }
+
+            .root-directory {
+                @apply font-bold text-gray-800;
+            }
+
+            .search-highlight {
+                @apply bg-yellow-100;
+            }
+
+            .notification-container {
+                @apply fixed top-4 right-4 z-50 flex flex-col items-end gap-2 w-80;
+            }
+
+            .notification {
+                @apply w-full p-4 rounded-lg shadow-lg transform transition-all duration-500 ease-out opacity-0 translate-x-full;
+                animation: slideIn 0.5s forwards;
+            }
+
+            .notification-exit {
+                @apply opacity-0 h-0 p-0 hidden;
+            }
+
+            @keyframes slideIn {
+                to {
+                    @apply opacity-100 translate-x-0;
+                }
+            }
+
+            .notification-success {
+                @apply bg-success text-white border-l-4 border-green-700;
+            }
+
+            .notification-error {
+                @apply bg-danger text-white border-l-4 border-red-700;
+            }
+
+            .notification-warning {
+                @apply bg-warning text-white border-l-4 border-yellow-700;
+            }
+
+            .notification-info {
+                @apply bg-primary text-white border-l-4 border-blue-700;
+            }
+
+            .notification-title {
+                @apply font-bold text-sm mb-1 flex items-center;
+            }
+
+            .notification-message {
+                @apply text-sm opacity-90;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-6xl">
+        <!-- 浏览器不支持提示栏 -->
+        <div id="browserSupportMessage" class="browser-support-message">
+            <i class="fa fa-info-circle mr-2"></i>
+            <span>您的浏览器不支持文件夹API，将使用传统下载方式</span>
+        </div>
+
+        <header class="mb-8 text-center">
+            <h1 class="text-2xl md:text-3xl font-bold text-gray-800 mb-2">
+                <i class="fa fa-github text-gray-700 mr-2"></i>
+                <a href="https://github.com/howdy213/GitTools">GitHub文件批量下载器</a>
+            </h1>
+            <p class="text-gray-600">支持镜像站加速、ZIP打包与历史记录管理</p>
+        </header>
+
+        <!-- 仓库信息输入区域 -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <!-- 历史记录下拉框 -->
+            <div class="relative mb-4">
+                <label for="historySelect" class="block text-sm font-medium text-gray-700 mb-1">历史记录</label>
+                <div class="relative">
+                    <input type="text" id="historySelect" placeholder="输入GitHub仓库地址或选择历史记录"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary">
+                    <button id="toggleHistoryBtn" class="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-500 hover:text-primary">
+                        <i class="fa fa-chevron-down"></i>
+                    </button>
+                    <div id="historyDropdown" class="hidden absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-60 overflow-y-auto z-10">
+                        <div id="historyList" class="text-sm">
+                            <div class="text-center text-gray-500 py-2">暂无历史记录</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4" id="repoDetails">
+                <div>
+                    <label for="owner" class="block text-sm font-medium text-gray-700 mb-1">用户名/组织</label>
+                    <input type="text" id="owner" placeholder="例如: octocat"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary">
+                </div>
+                <div>
+                    <label for="repo" class="block text-sm font-medium text-gray-700 mb-1">仓库名</label>
+                    <input type="text" id="repo" placeholder="例如: HelloWorld"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary">
+                </div>
+                <div>
+                    <label for="branch" class="block text-sm font-medium text-gray-700 mb-1">分支</label>
+                    <input type="text" id="branch" placeholder="例如: main" value="main"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary">
+                </div>
+            </div>
+            <!-- 镜像站选择区域 -->
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">资源站点</label>
+                <div class="flex flex-wrap" id="mirrorOptions">
+                    <div class="mirror-option">
+                        <input type="radio" id="mirrorOfficial" name="mirror" value="official" checked
+                               class="mr-2 h-4 w-4 text-primary focus:ring-primary">
+                        <label for="mirrorOfficial" class="cursor-pointer">GitHub</label>
+                        <button class="ml-1 text-gray-400 hover:text-primary mirror-info-btn">
+                            <i class="fa fa-info-circle"></i>
+                            <span class="mirror-info-tooltip">
+                                <strong>github.com</strong><br>
+                                ✓ 支持所有API功能<br>
+                                ✓ 支持文件树查询<br>
+                                ✓ 支持单个文件下载<br>
+                                ✓ 支持完整仓库ZIP下载<br>
+                                全球通用，但部分地区访问速度慢
+                            </span>
+                        </button>
+                    </div>
+
+                    <div class="mirror-option">
+                        <input type="radio" id="mirrorKkgithub" name="mirror" value="kkgithub"
+                               class="mr-2 h-4 w-4 text-primary focus:ring-primary">
+                        <label for="mirrorKkgithub" class="cursor-pointer">kkgithub</label>
+                        <button class="ml-1 text-gray-400 hover:text-primary mirror-info-btn">
+                            <i class="fa fa-info-circle"></i>
+                            <span class="mirror-info-tooltip">
+                                <strong>kkgithub.com</strong><br>
+                                ✓ 支持API文件树查询<br>
+                                ✓ 支持单个文件下载<br>
+                                ✓ 支持完整仓库ZIP下载
+                            </span>
+                        </button>
+                    </div>
+
+                    <div class="mirror-option">
+                        <input type="radio" id="mirrorJsdelivr" name="mirror" value="jsdelivr"
+                               class="mr-2 h-4 w-4 text-primary focus:ring-primary">
+                        <label for="mirrorJsdelivr" class="cursor-pointer">jsdelivr</label>
+                        <button class="ml-1 text-gray-400 hover:text-primary mirror-info-btn">
+                            <i class="fa fa-info-circle"></i>
+                            <span class="mirror-info-tooltip">
+                                <strong>jsdelivr.com</strong><br>
+                                × 不支持API文件树查询<br>
+                                ✓ 支持单个文件下载<br>
+                                × 不支持下载完整仓库ZIP<br>
+                                适合静态资源访问
+                            </span>
+                        </button>
+                    </div>
+
+                    <div class="mirror-option">
+                        <input type="radio" id="mirrorBgithub" name="mirror" value="bgithub"
+                               class="mr-2 h-4 w-4 text-primary focus:ring-primary">
+                        <label for="mirrorBgithub" class="cursor-pointer">bgithub</label>
+                        <button class="ml-1 text-gray-400 hover:text-primary mirror-info-btn">
+                            <i class="fa fa-info-circle"></i>
+                            <span class="mirror-info-tooltip">
+                                <strong>bgithub.xyz</strong><br>
+                                × 不支持API文件树查询<br>
+                                ✓ 支持单个文件下载<br>
+                                ✓ 支持完整仓库ZIP下载
+                            </span>
+                        </button>
+                    </div>
+                    <div class="mirror-option">
+                        <input type="radio" id="mirrorGhddlctop" name="mirror" value="ghddlctop"
+                               class="mr-2 h-4 w-4 text-primary focus:ring-primary">
+                        <label for="mirrorGhddlctop" class="cursor-pointer">ddlc</label>
+                        <button class="ml-1 text-gray-400 hover:text-primary mirror-info-btn">
+                            <i class="fa fa-info-circle"></i>
+                            <span class="mirror-info-tooltip">
+                                <strong>gh.ddlc.top</strong><br>
+                                × 可能存在CORS问题<br>
+                                × 不支持API文件树查询<br>
+                                ✓ 支持单个文件下载<br>
+                                ✓ 支持完整仓库ZIP下载
+                            </span>
+                        </button>
+                    </div>
+
+                    <div class="mirror-option">
+                        <input type="radio" id="mirrorHubgitmirror" name="mirror" value="hubgitmirror"
+                               class="mr-2 h-4 w-4 text-primary focus:ring-primary">
+                        <label for="mirrorHubgitmirror" class="cursor-pointer">gitmirror</label>
+                        <button class="ml-1 text-gray-400 hover:text-primary mirror-info-btn">
+                            <i class="fa fa-info-circle"></i>
+                            <span class="mirror-info-tooltip">
+                                <strong>hub.gitmirror.com</strong><br>
+                                × 不支持API文件树查询（无权限）<br>
+                                ✓ 支持单个文件下载<br>
+                                ✓ 支持完整仓库ZIP下载
+                            </span>
+                        </button>
+                    </div>
+
+                    <div class="mirror-option">
+                        <input type="radio" id="mirrorGhproxy" name="mirror" value="ghproxy"
+                               class="mr-2 h-4 w-4 text-primary focus:ring-primary">
+                        <label for="mirrorGhproxy" class="cursor-pointer">ghproxy</label>
+                        <button class="ml-1 text-gray-400 hover:text-primary mirror-info-btn">
+                            <i class="fa fa-info-circle"></i>
+                            <span class="mirror-info-tooltip">
+                                <strong>ghproxy.net</strong><br>
+                                × 不支持API文件树查询<br>
+                                ✓ 支持单个文件下载<br>
+                                ✓ 支持完整仓库ZIP下载<br>
+                                ghproxy.link查询可用镜像
+                            </span>
+                        </button>
+                    </div>
+
+                    <div class="mirror-option">
+                        <input type="radio" id="mirrorDgithub" name="mirror" value="dgithub"
+                               class="mr-2 h-4 w-4 text-primary focus:ring-primary">
+                        <label for="mirrorDgithub" class="cursor-pointer">dgithub</label>
+                        <button class="ml-1 text-gray-400 hover:text-primary mirror-info-btn">
+                            <i class="fa fa-info-circle"></i>
+                            <span class="mirror-info-tooltip">
+                                <strong>dgithub.xyz</strong><br>
+                                × 不支持API文件树查询<br>
+                                ✓ 支持单个文件下载<br>
+                                ✓ 支持完整仓库ZIP下载
+                            </span>
+                        </button>
+                    </div>
+
+                    <div class="mirror-option">
+                        <input type="radio" id="mirrorGitclone" name="mirror" value="gitclone"
+                               class="mr-2 h-4 w-4 text-primary focus:ring-primary" disabled>
+                        <label for="mirrorGitclone" class="cursor-pointer">gitclone</label>
+                        <button class="ml-1 text-gray-400 hover:text-primary mirror-info-btn">
+                            <i class="fa fa-info-circle"></i>
+                            <span class="mirror-info-tooltip">
+                                <strong>gitclone.com</strong><br>
+                                × 需要注册账号<br>
+                                × 无法直链访问
+                            </span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <!-- 下载位置选择区域 -->
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">下载位置</label>
+                <div class="flex items-center gap-2">
+                    <input type="text" id="downloadPathDisplay" placeholder="未选择下载位置"
+                           class="flex-1 path-display" readonly>
+                    <button id="chooseDownloadPathBtn" class="px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 focus:outline-none transition-all flex items-center">
+                        <i class="fa fa-folder-open mr-1"></i>选择位置
+                    </button>
+                </div>
+                <p class="text-xs text-gray-500 mt-1">上次选择的位置将被自动保存</p>
+            </div>
+
+            <div class="mt-4 flex flex-wrap justify-center gap-2">
+                <button id="parseUrlBtn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 focus:outline-none transition-all flex items-center">
+                    <i class="fa fa-link mr-1"></i>解析网址
+                </button>
+                <button id="clearHistoryBtn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 focus:outline-none transition-all flex items-center">
+                    <i class="fa fa-trash mr-1"></i>清除历史
+                </button>
+                <button id="loadFilesBtn" class="px-6 py-2 bg-primary text-white rounded-md hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all flex items-center">
+                    <i class="fa fa-folder-open mr-2"></i>加载文件列表
+                </button>
+            </div>
+        </div>
+
+        <!-- 操作和状态区域 -->
+        <div class="bg-white rounded-lg shadow-md p-4 mb-6 hidden" id="controlsSection">
+            <div class="flex flex-wrap justify-between items-center gap-4">
+                <div class="flex flex-wrap gap-2">
+                    <button id="selectAllBtn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 focus:outline-none transition-all flex items-center">
+                        <i class="fa fa-check-square-o mr-1"></i>全选
+                    </button>
+                    <button id="deselectAllBtn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 focus:outline-none transition-all flex items-center">
+                        <i class="fa fa-square-o mr-1"></i>取消全选
+                    </button>
+                    <button id="invertSelectionBtn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 focus:outline-none transition-all flex items-center">
+                        <i class="fa fa-exchange mr-1"></i>反选
+                    </button>
+                    <!--
+                    <button id="selectAllFoldersBtn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 focus:outline-none transition-all flex items-center">
+                        <i class="fa fa-folder-open mr-1"></i>全选文件夹
+                    </button>-->
+                    <button id="selectPendingBtn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 focus:outline-none transition-all flex items-center">
+                        <i class="fa fa-clock-o mr-1"></i>选择未下载
+                    </button>
+                    <button id="expandAllBtn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 focus:outline-none transition-all flex items-center">
+                        <i class="fa fa-plus-square-o mr-1"></i>全部展开
+                    </button>
+                    <button id="collapseAllBtn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 focus:outline-none transition-all flex items-center">
+                        <i class="fa fa-minus-square-o mr-1"></i>全部收起
+                    </button>
+                    <button id="expandDownloadedBtn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 focus:outline-none transition-all flex items-center">
+                        <i class="fa fa-check-square mr-1"></i>展开已下载
+                    </button>
+                </div>
+                <div class="flex gap-2">
+                    <div class="relative">
+                        <input type="text" id="searchDownloadedInput" placeholder="搜索已下载文件..."
+                               class="pl-8 pr-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary text-sm">
+                        <i class="fa fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+                    </div>
+                    <button id="searchDownloadedBtn" class="px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all flex items-center">
+                        <i class="fa fa-search mr-1"></i>查询
+                    </button>
+                    <button id="downloadBtn" class="px-6 py-2 bg-success text-white rounded-md hover:bg-success/90 focus:outline-none focus:ring-2 focus:ring-success/50 transition-all flex items-center">
+                        <i class="fa fa-download mr-2"></i>下载所选
+                    </button>
+                    <button id="zipDownloadBtn" class="px-6 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all flex items-center">
+                        <i class="fa fa-file-zip-o mr-2"></i>打包为ZIP
+                    </button>
+                    <button id="partialZipBtn" class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all flex items-center hidden">
+                        <i class="fa fa-file-zip-o mr-2"></i>打包已下载
+                    </button>
+                    <button id="cancelDownloadBtn" class="px-4 py-2 bg-danger text-white rounded-md hover:bg-danger/90 focus:outline-none transition-all flex items-center hidden">
+                        <i class="fa fa-stop mr-1"></i>取消下载
+                    </button>
+                    <button id="clearProgressBtn" class="px-4 py-2 bg-warning text-white rounded-md hover:bg-warning/90 focus:outline-none transition-all flex items-center">
+                        <i class="fa fa-refresh mr-1"></i>清除进度
+                    </button>
+                </div>
+            </div>
+
+            <!-- 下载进度 -->
+            <div class="mt-4 hidden" id="progressSection">
+                <div class="flex justify-between text-sm mb-1">
+                    <span id="progressText">准备下载...</span>
+                    <span id="progressPercent">0%</span>
+                </div>
+                <div class="progress-container">
+                    <div id="progressBar" class="progress-bar" style="width: 0%"></div>
+                </div>
+
+                <!-- 下载统计信息 -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-2 mt-2 text-sm">
+                    <div class="bg-gray-50 p-2 rounded">
+                        <div class="text-gray-500">文件大小</div>
+                        <div id="downloadSizeInfo" class="font-medium">0 MB / 0 MB</div>
+                    </div>
+                    <div class="bg-gray-50 p-2 rounded">
+                        <div class="text-gray-500">处理速度</div>
+                        <div id="downloadSpeedInfo" class="font-medium text-primary">0 KB/s</div>
+                    </div>
+                    <div class="bg-gray-50 p-2 rounded">
+                        <div class="text-gray-500">剩余时间</div>
+                        <div id="estimatedTimeInfo" class="font-medium">--:--</div>
+                    </div>
+                </div>
+
+                <!-- 当前文件处理进度 -->
+                <div class="mt-2 text-sm">
+                    <div id="currentFileLabel" class="text-gray-700 font-medium">当前文件:</div>
+                    <div id="currentFileStatus" class="text-gray-600 truncate">-</div>
+                    <div class="progress-container mt-1">
+                        <div id="currentFileProgressBar" class="progress-bar bg-success" style="width: 0%"></div>
+                    </div>
+                </div>
+
+                <!-- 最近处理的文件列表 -->
+                <div class="mt-3 text-xs text-gray-500">
+                    <div>最近处理:</div>
+                    <div id="recentFilesList" class="max-h-24 overflow-y-auto mt-1">
+                        <!-- 最近处理的文件会在这里显示 -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 文件列表区域 -->
+        <div class="bg-white rounded-lg shadow-md overflow-hidden hidden" id="fileListSection">
+            <div class="p-4 border-b border-gray-200 bg-gray-50">
+                <h2 class="font-semibold text-gray-800 flex items-center">
+                    <i class="fa fa-files-o mr-2"></i>文件列表
+                    <span id="fileCountBadge" class="ml-2 bg-gray-200 text-gray-700 text-xs px-2 py-1 rounded-full">0个文件</span>
+                    <span id="folderCountBadge" class="ml-2 bg-yellow-100 text-yellow-800 text-xs px-2 py-1 rounded-full">0个文件夹</span>
+                    <span id="selectedCountBadge" class="ml-2 bg-primary text-white text-xs px-2 py-1 rounded-full">已选择0个</span>
+                    <span id="downloadedCountBadge" class="ml-2 bg-success text-white text-xs px-2 py-1 rounded-full">已下载0个</span>
+                    <span id="totalSizeBadge" class="ml-2 bg-gray-200 text-gray-700 text-xs px-2 py-1 rounded-full">总大小: 0 MB</span>
+                </h2>
+            </div>
+            <div id="fileTree" class="p-2 max-h-[60vh] overflow-y-auto">
+                <div class="text-center text-gray-500 py-8">
+                    <i class="fa fa-info-circle text-2xl mb-2"></i>
+                    <p>文件列表将显示在这里</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 信息和提示区域 -->
+        <div class="bg-blue-50 border-l-4 border-primary p-4 rounded-md mt-6">
+            <h3 class="font-medium text-primary flex items-center">
+                <i class="fa fa-lightbulb-o mr-2"></i>使用提示
+            </h3>
+            <ul class="mt-2 text-sm text-blue-700 list-disc list-inside space-y-1">
+                <li>部分镜像站不支持文件树查询，需要先通过官方站点加载文件列表</li>
+                <li>ZIP下载过程中可点击"打包已下载"将已完成的文件先行打包</li>
+                <li>全选文件时，会提示使用所选站点提供的ZIP，下载速度更快</li>
+                <li>在搜索时加上"(not-)downloaded: "/"(not-)selected: "搜索指定文件</li>
+            </ul>
+        </div>
+    </div>
+    <div id="notificationContainer" class="notification-container"></div>
+    <script>
+        // 全局变量
+        let fileList = [];          // 所有文件列表
+        let fileTreeStructure = null; // 文件树结构
+        let selectedItems = new Set(); // 选中的项目（文件或文件夹路径）
+        let downloadedFiles = new Set(); // 已下载的文件
+        let currentRepoKey = '';    // 当前仓库的唯一标识
+        let isDownloading = false;  // 是否正在下载
+        let downloadAbortController = null; // 用于中止下载的控制器
+        let historyRecords = [];    // 历史记录
+        const MAX_HISTORY = 10;     // 最大历史记录数量
+        let rootDirectoryHandle = null; // 根目录句柄
+        let lastDownloadPath = '';  // 上次下载路径（显示用）
+        let recentFiles = [];       // 最近下载的文件列表
+        let totalDownloadSize = 0;  // 总下载大小（字节）
+        let downloadedSize = 0;     // 已下载大小（字节）
+        let downloadSpeed = 0;      // 当前下载速度（字节/秒）
+        let lastDownloadedBytes = 0;// 上一秒已下载字节数
+        let downloadSpeedInterval = null; // 计算下载速度的定时器
+        let supportsFileSystem = false; // 是否支持FileSystem API
+        let zipAbortController = null; // 用于中止ZIP打包的控制器
+        let zipInstance = null; // 当前的ZIP实例
+        let remainingFiles = []; // 剩余未下载的文件
+        let currentBatchNumber = 1; // 当前ZIP批次号
+        let searchHighlightedPaths = new Set(); // 搜索高亮的文件路径
+
+        // 镜像站配置
+        const mirrorConfig = {
+            official: {
+                convert: function (owner, repo, branch, file, type, method) {
+                    const encodedPath = file.split('/')
+                        .map(segment => encodeURIComponent(segment))
+                        .join('/');
+                    switch (type) {
+                        case 'api':
+                            switch (method) {
+                                case 'tree': return `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
+                            }
+                        case 'raw': return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${encodedPath}`;
+                        case 'zip': return `https://github.com/${owner}/${repo}/archive/refs/heads/${branch}.zip`;
+                    }
+                }
+            },
+            kkgithub: {
+                convert: function (owner, repo, branch, file, type, method) {
+                    const encodedPath = file.split('/')
+                        .map(segment => encodeURIComponent(segment))
+                        .join('/');
+                    switch (type) {
+                        case 'api':
+                            switch (method) {
+                                case 'tree': return `https://api.kkgithub.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
+                            }
+                        case 'raw': return `https://raw.kkgithub.com/${owner}/${repo}/${branch}/${encodedPath}`;
+                        case 'zip': return `https://kkgithub.com/${owner}/${repo}/archive/refs/heads/${branch}.zip`;
+                    }
+                }
+            },
+            dgithub: {
+                convert: function (owner, repo, branch, file, type, method) {
+                    const encodedPath = file.split('/')
+                        .map(segment => encodeURIComponent(segment))
+                        .join('/');
+                    switch (type) {
+                        case 'api':
+                            switch (method) {
+                                case 'tree': return mirrorConfig.official.convert(owner, repo, branch, file, type, method);
+                            }
+                        case 'raw': return `https://raw.dgithub.xyz/${owner}/${repo}/${branch}/${encodedPath}`;
+                        case 'zip': return `https://dgithub.xyz/${owner}/${repo}/archive/refs/heads/${branch}.zip`;
+                    }
+                }
+            },
+            hubgitmirror: {
+                convert: function (owner, repo, branch, file, type, method) {
+                    const officialUrl = mirrorConfig.official.convert(owner, repo, branch, file, type, method);
+                    return officialUrl ? `https://hub.gitmirror.com/${officialUrl}` : '';
+                }
+            },
+            ghddlctop: {
+                convert: function (owner, repo, branch, file, type, method) {
+                    const officialUrl = mirrorConfig.official.convert(owner, repo, branch, file, type, method);
+                    return officialUrl ? `https://gh.ddlc.top/${officialUrl}` : '';
+                },
+                supportsFileTree: true
+            },
+            gitclone: {
+                convert: function (owner, repo, branch, file, type, method) {
+                    return mirrorConfig.official.convert(owner, repo, branch, file, type, method);
+                }
+            },
+            bgithub: {
+                convert: function (owner, repo, branch, file, type, method) {
+                    const encodedPath = file.split('/')
+                        .map(segment => encodeURIComponent(segment))
+                        .join('/');
+                    switch (type) {
+                        case 'api':
+                            switch (method) {
+                                case 'tree': return mirrorConfig.official.convert(owner, repo, branch, file, type, method);
+                            }
+                        case 'raw': return `https://raw.bgithub.xyz/${owner}/${repo}/${branch}/${encodedPath}`;
+                        case 'zip': return `https://bgithub.xyz/${owner}/${repo}/archive/refs/heads/${branch}.zip`;
+                    }
+                }
+            },
+            ghproxy: {
+                convert: function (owner, repo, branch, file, type, method) {
+                    const encodedPath = file.split('/')
+                        .map(segment => encodeURIComponent(segment))
+                        .join('/');
+                    const baseUrl = 'https://ghproxy.net';
+                    switch (type) {
+                        case 'api':
+                            switch (method) {
+                                case 'tree': return mirrorConfig.official.convert(owner, repo, branch, file, type, method);
+                            }
+                        case 'raw': return `${baseUrl}/https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${encodedPath}`;
+                        case 'zip': return `${baseUrl}/https://github.com/${owner}/${repo}/archive/refs/heads/${branch}.zip`;
+                    }
+                }
+            },
+            jsdelivr: {
+                convert: function (owner, repo, branch, file, type, method) {
+                    const encodedPath = file.split('/')
+                        .map(segment => encodeURIComponent(segment))
+                        .join('/');
+                    switch (type) {
+                        case 'api':
+                            switch (method) {
+                                case 'tree': return mirrorConfig.official.convert(owner, repo, branch, file, type, method);
+                            }
+                        case 'raw': return `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${branch}/${encodedPath}`;
+                        case 'zip': return mirrorConfig.official.convert(owner, repo, branch, file, type, method);
+                    }
+                }
+            }
+        };
+
+
+        // DOM元素
+        const historySelect = document.getElementById('historySelect');
+        const toggleHistoryBtn = document.getElementById('toggleHistoryBtn');
+        const historyDropdown = document.getElementById('historyDropdown');
+        const historyList = document.getElementById('historyList');
+        const clearHistoryBtn = document.getElementById('clearHistoryBtn');
+        const ownerInput = document.getElementById('owner');
+        const repoInput = document.getElementById('repo');
+        const branchInput = document.getElementById('branch');
+        const parseUrlBtn = document.getElementById('parseUrlBtn');
+        const loadFilesBtn = document.getElementById('loadFilesBtn');
+        const fileListSection = document.getElementById('fileListSection');
+        const controlsSection = document.getElementById('controlsSection');
+        const fileTree = document.getElementById('fileTree');
+        const fileCountBadge = document.getElementById('fileCountBadge');
+        const folderCountBadge = document.getElementById('folderCountBadge');
+        const selectedCountBadge = document.getElementById('selectedCountBadge');
+        const downloadedCountBadge = document.getElementById('downloadedCountBadge');
+        const totalSizeBadge = document.getElementById('totalSizeBadge');
+        const selectAllBtn = document.getElementById('selectAllBtn');
+        const deselectAllBtn = document.getElementById('deselectAllBtn');
+        const invertSelectionBtn = document.getElementById('invertSelectionBtn');
+        //const selectAllFoldersBtn = document.getElementById('selectAllFoldersBtn');
+        const selectPendingBtn = document.getElementById('selectPendingBtn');
+        const expandAllBtn = document.getElementById('expandAllBtn');
+        const collapseAllBtn = document.getElementById('collapseAllBtn');
+        const expandDownloadedBtn = document.getElementById('expandDownloadedBtn');
+        const searchDownloadedInput = document.getElementById('searchDownloadedInput');
+        const searchDownloadedBtn = document.getElementById('searchDownloadedBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const zipDownloadBtn = document.getElementById('zipDownloadBtn');
+        const partialZipBtn = document.getElementById('partialZipBtn');
+        const cancelDownloadBtn = document.getElementById('cancelDownloadBtn');
+        const clearProgressBtn = document.getElementById('clearProgressBtn');
+        const progressSection = document.getElementById('progressSection');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const progressPercent = document.getElementById('progressPercent');
+        const currentFileStatus = document.getElementById('currentFileStatus');
+        const currentFileLabel = document.getElementById('currentFileLabel');
+        const currentFileProgressBar = document.getElementById('currentFileProgressBar');
+        const recentFilesList = document.getElementById('recentFilesList');
+        const downloadSizeInfo = document.getElementById('downloadSizeInfo');
+        const downloadSpeedInfo = document.getElementById('downloadSpeedInfo');
+        const estimatedTimeInfo = document.getElementById('estimatedTimeInfo');
+        const downloadPathDisplay = document.getElementById('downloadPathDisplay');
+        const chooseDownloadPathBtn = document.getElementById('chooseDownloadPathBtn');
+        const browserSupportMessage = document.getElementById('browserSupportMessage');
+
+        // 初始化事件监听
+        function initEventListeners() {
+            // 历史记录相关
+            toggleHistoryBtn.addEventListener('click', toggleHistoryDropdown);
+            clearHistoryBtn.addEventListener('click', clearHistory);
+            historySelect.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') parseGitHubUrl();
+            });
+            document.addEventListener('click', (e) => {
+                if (!historySelect.contains(e.target) && !toggleHistoryBtn.contains(e.target) &&
+                    !historyDropdown.contains(e.target)) {
+                    historyDropdown.classList.add('hidden');
+                }
+            });
+
+            // 解析和加载相关
+            parseUrlBtn.addEventListener('click', parseGitHubUrl);
+            loadFilesBtn.addEventListener('click', loadRepositoryFiles);
+
+            // 选择相关
+            selectAllBtn.addEventListener('click', selectAllItems);
+            deselectAllBtn.addEventListener('click', deselectAllItems);
+            invertSelectionBtn.addEventListener('click', invertSelection);
+            //selectAllFoldersBtn.addEventListener('click', selectAllFolders);
+            selectPendingBtn.addEventListener('click', selectPendingItems);
+
+            // 展开/收起相关
+            expandAllBtn.addEventListener('click', expandAllDirectories);
+            collapseAllBtn.addEventListener('click', collapseAllDirectories);
+            expandDownloadedBtn.addEventListener('click', expandDownloadedDirectories);
+
+            // 搜索相关
+            searchDownloadedBtn.addEventListener('click', searchDownloadedFiles);
+            searchDownloadedInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') searchDownloadedFiles();
+            });
+
+            // 下载相关
+            downloadBtn.addEventListener('click', downloadSelectedItems);
+            zipDownloadBtn.addEventListener('click', downloadAsZip);
+            partialZipBtn.addEventListener('click', createPartialZip);
+            cancelDownloadBtn.addEventListener('click', cancelDownload);
+            clearProgressBtn.addEventListener('click', clearDownloadProgress);
+
+            // 下载位置选择
+            chooseDownloadPathBtn.addEventListener('click', chooseDownloadPath);
+
+            // 镜像站信息按钮事件
+            document.querySelectorAll('.mirror-info-btn').forEach(btn => {
+                // 鼠标悬停显示提示
+                btn.addEventListener('mouseenter', (e) => {
+                    const tooltip = btn.querySelector('.mirror-info-tooltip');
+                    tooltip.style.top = `${e.target.getBoundingClientRect().bottom + window.scrollY + 5}px`;
+                    tooltip.style.left = `${e.target.getBoundingClientRect().left + window.scrollX}px`;
+                    tooltip.style.opacity = '1.0';
+                });
+
+                // 鼠标离开隐藏提示
+                btn.addEventListener('mouseleave', () => {
+                    const tooltip = btn.querySelector('.mirror-info-tooltip');
+                    tooltip.style.opacity = '0.0';
+                });
+
+            });
+
+            // 镜像站切换时的提示
+            document.querySelectorAll('input[name="mirror"]').forEach(radio => {
+                radio.addEventListener('change', (e) => {
+                });
+            });
+        }
+        // 消息通知系统
+        const notificationTypes = {
+            success: {
+                class: 'notification-success',
+                icon: 'fa-check-circle'
+            },
+            error: {
+                class: 'notification-error',
+                icon: 'fa-exclamation-circle'
+            },
+            warning: {
+                class: 'notification-warning',
+                icon: 'fa-exclamation-triangle'
+            },
+            info: {
+                class: 'notification-info',
+                icon: 'fa-info-circle'
+            }
+        };
+
+        function translateNotificationType(type) {
+            switch (type) {
+                case 'success': return '成功';
+                case 'error': return '错误';
+                case 'warning': return '警告';
+                case 'info': return '消息';
+            }
+            return null;
+        }
+        // 创建通知元素
+        function createNotificationElement(type, message, title, duration) {
+            const container = document.createElement('div');
+            const config = notificationTypes[type];
+
+            container.className = `notification ${config.class}`;
+            container.dataset.duration = duration;
+
+            container.innerHTML = `
+                                                    <div class="notification-title">
+                                                        <i class="fa ${config.icon} mr-2"></i>${title}
+                                                    </div>
+                                                    <div class="notification-message">${message}</div>
+                                                `;
+
+            return container;
+        }
+
+        // 显示通知
+        function showNotification(type, message, title = null, duration = 2500) {
+            const trType = translateNotificationType(type);
+            if (trType === null) {
+                console.error(`Unknown notification type:${type}`);
+                return;
+            }
+            if (title === null) {
+                title = trType;
+            }
+            const container = document.getElementById('notificationContainer');
+            const notification = createNotificationElement(type, message, title, duration);
+
+            // 添加到容器（新消息在下方）
+            container.appendChild(notification);
+
+            // 设置自动移除
+            setTimeout(() => {
+                removeNotification(notification);
+            }, duration);
+
+            return notification;
+        }
+
+        // 移除通知（带动画）
+        function removeNotification(notification) {
+            // 添加退出动画类
+            notification.classList.remove('notification');
+            notification.classList.add('notification-exit');
+
+            // 等待动画完成后移除元素
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.parentNode.removeChild(notification);
+                }
+            }, 300);
+        }
+
+        // 获取当前选中的镜像站配置
+        function getCurrentMirrorConfig() {
+            const selectedMirror = document.querySelector('input[name="mirror"]:checked').value;
+            return mirrorConfig[selectedMirror] || mirrorConfig.official;
+        }
+
+        // 初始化浏览器特性检测
+        function detectBrowserFeatures() {
+            // 检测是否支持FileSystem API
+            supportsFileSystem = 'showDirectoryPicker' in window;
+            console.log('浏览器是否支持FileSystem API:', supportsFileSystem);
+
+            // 如果不支持，显示提示栏
+            if (!supportsFileSystem) {
+                browserSupportMessage.classList.remove('hidden');
+            }
+        }
+
+        // 初始化历史记录和下载位置
+        function initAppData() {
+            try {
+                // 初始化历史记录
+                const savedHistory = localStorage.getItem('githubDownloaderHistory');
+                historyRecords = savedHistory ? JSON.parse(savedHistory) : [];
+
+                // 初始化下载位置
+                const savedPath = localStorage.getItem('githubDownloaderLastPath');
+                if (savedPath) {
+                    lastDownloadPath = savedPath;
+                    downloadPathDisplay.value = lastDownloadPath;
+
+                    // 尝试恢复目录句柄（受浏览器安全限制可能失败）
+                    if (supportsFileSystem) {
+                        restoreDirectoryHandle();
+                    }
+                }
+            } catch (e) {
+                console.error('初始化数据失败:', e);
+                historyRecords = [];
+            }
+            renderHistoryList();
+        }
+
+        // 尝试恢复目录句柄
+        async function restoreDirectoryHandle() {
+        }
+
+        // 渲染历史记录列表
+        function renderHistoryList() {
+            if (historyRecords.length === 0) {
+                historyList.innerHTML = '<div class="text-center text-gray-500 py-2">暂无历史记录</div>';
+                return;
+            }
+
+            historyList.innerHTML = '';
+            historyRecords.forEach((record, index) => {
+                // 计算下载进度
+                const totalFiles = record.totalFiles || '?';
+                const downloaded = record.downloaded || 0;
+                const progress = totalFiles !== '?' ? `${downloaded}/${totalFiles}` : '未获取总数';
+
+                const item = document.createElement('div');
+                item.className = 'history-item';
+                item.innerHTML = `
+                                                                                                <div class="flex-1 min-w-0">
+                                                                                                    <div class="font-medium truncate">${record.owner}/${record.repo}</div>
+                                                                                                    <div class="text-xs text-gray-500 truncate">
+                                                                                                        分支: ${record.branch} &middot;
+                                                                                                        进度: ${progress} &middot;
+                                                                                                        ${new Date(record.timestamp).toLocaleString()}
+                                                                                                    </div>
+                                                                                                </div>
+                                                                                                <div class="flex items-center">
+                                                                                                    <button class="refresh-history mr-2 text-gray-400 hover:text-primary transition-colors text-xs" data-index="${index}">
+                                                                                                        <i class="fa fa-refresh"></i>
+                                                                                                    </button>
+                                                                                                    <button class="delete-history ml-2 text-gray-400 hover:text-danger transition-colors" data-index="${index}">
+                                                                                                        <i class="fa fa-times"></i>
+                                                                                                    </button>
+                                                                                                </div>
+                                                                                            `;
+
+                // 刷新按钮事件
+                item.querySelector('.refresh-history').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    refreshHistoryFileCount(index);
+                });
+
+                // 删除按钮事件
+                item.querySelector('.delete-history').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteHistoryItem(index);
+                });
+
+                // 点击历史记录事件
+                item.addEventListener('click', () => {
+                    ownerInput.value = record.owner;
+                    repoInput.value = record.repo;
+                    branchInput.value = record.branch;
+                    historySelect.value = `https://github.com/${record.owner}/${record.repo}/tree/${record.branch}`;
+                    historyDropdown.classList.add('hidden');
+                });
+
+                historyList.appendChild(item);
+            });
+        }
+
+        // 刷新历史记录的文件总数
+        async function refreshHistoryFileCount(index) {
+            const record = historyRecords[index];
+            if (!record) return;
+
+            try {
+                const mirror = getCurrentMirrorConfig();
+                const apiUrl = mirror.convert(record.owner, record.repo, record.branch, '', 'api', 'tree');
+
+                const response = await fetchWithRetry(apiUrl);
+
+                if (!response.ok) {
+                    throw new Error(`API请求失败: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                if (!data.tree) {
+                    throw new Error('无法获取文件列表');
+                }
+
+                // 统计文件总数和总大小
+                const files = data.tree.filter(item => item.type === 'blob');
+                const totalFiles = files.length;
+                const totalSize = files.reduce((sum, file) => sum + (file.size || 0), 0);
+
+                // 更新记录
+                historyRecords[index].totalFiles = totalFiles;
+                historyRecords[index].totalSize = totalSize;
+
+                // 从本地存储获取已下载数量
+                const repoKey = `github_downloader_${record.owner}_${record.repo}_${record.branch}`;
+                const savedProgress = localStorage.getItem(repoKey);
+                if (savedProgress) {
+                    const parsed = JSON.parse(savedProgress);
+                    historyRecords[index].downloaded = parsed.downloaded ? parsed.downloaded.length : 0;
+                }
+
+                // 保存并刷新列表
+                localStorage.setItem('githubDownloaderHistory', JSON.stringify(historyRecords));
+                renderHistoryList();
+                showNotification('success', '文件信息已更新');
+
+            } catch (error) {
+                console.error('刷新文件信息失败:', error);
+                showNotification('error', `刷新失败: ${error.message}`);
+            }
+        }
+
+        // 删除单个历史记录
+        function deleteHistoryItem(index) {
+            historyRecords.splice(index, 1);
+            localStorage.setItem('githubDownloaderHistory', JSON.stringify(historyRecords));
+            renderHistoryList();
+            showNotification('info', '历史记录已删除');
+        }
+
+        // 切换历史记录下拉框显示
+        function toggleHistoryDropdown() {
+            historyDropdown.classList.toggle('hidden');
+        }
+
+        // 添加记录到历史
+        function addToHistory(owner, repo, branch, totalFiles, totalSize) {
+            // 检查是否已存在相同记录
+            const existingIndex = historyRecords.findIndex(
+                r => r.owner === owner && r.repo === repo && r.branch === branch
+            );
+
+            if (existingIndex !== -1) {
+                // 更新现有记录的时间戳和下载统计
+                const existing = historyRecords[existingIndex];
+                historyRecords.splice(existingIndex, 1);
+
+                // 保留文件总数，更新时间戳
+                const newRecord = {
+                    owner,
+                    repo,
+                    branch,
+                    timestamp: new Date().getTime(),
+                    totalFiles: totalFiles || existing.totalFiles,
+                    totalSize: totalSize || existing.totalSize,
+                    downloaded: existing.downloaded || 0
+                };
+                historyRecords.unshift(newRecord);
+            } else {
+                // 添加新记录到开头
+                historyRecords.unshift({
+                    owner,
+                    repo,
+                    branch,
+                    timestamp: new Date().getTime(),
+                    totalFiles: totalFiles,
+                    totalSize: totalSize,
+                    downloaded: downloadedFiles.size || 0
+                });
+            }
+
+            // 限制历史记录数量
+            if (historyRecords.length > MAX_HISTORY) {
+                historyRecords = historyRecords.slice(0, MAX_HISTORY);
+            }
+
+            localStorage.setItem('githubDownloaderHistory', JSON.stringify(historyRecords));
+            renderHistoryList();
+        }
+
+        // 清除历史记录
+        function clearHistory() {
+            if (confirm('确定要清除所有历史记录吗？')) {
+                historyRecords = [];
+                localStorage.removeItem('githubDownloaderHistory');
+                renderHistoryList();
+                showNotification('info', '所有历史记录已清除');
+            }
+        }
+
+        // 解析GitHub网址
+        function parseGitHubUrl() {
+            const url = historySelect.value.trim();
+            if (!url) {
+                showNotification('info', '请输入GitHub仓库网址');
+
+                return;
+            }
+
+            // 支持多种URL格式的正则表达式，包括镜像站
+            const regex = /^(https?:\/\/)?(www\.)?(github\.com|kkgithub\.com|dgithub\.io|gitclone\.com|fastgit\.org)\/([^\/]+)\/([^\/]+)(\/tree\/([^\/]+))?/i;
+            const match = url.match(regex);
+
+            if (match) {
+                const [, , , domain, owner, repoName, , branch] = match;
+                ownerInput.value = owner;
+                repoInput.value = repoName;
+                if (branch) branchInput.value = branch;
+
+                // 根据域名自动选择镜像站
+                switch (domain) {
+                    case 'kkgithub.com':
+                        document.getElementById('mirrorKkgithub').checked = true;
+                        break;
+                    case 'dgithub.io':
+                        document.getElementById('mirrorDgithub').checked = true;
+                        break;
+                    case 'gitclone.com':
+                        document.getElementById('mirrorGitclone').checked = true;
+                        break;
+                    case 'fastgit.org':
+                        document.getElementById('mirrorFastGit').checked = true;
+                        break;
+                    default:
+                        document.getElementById('mirrorOfficial').checked = true;
+                }
+
+                showNotification('success', '网址解析成功');
+            } else {
+                showNotification('error', '无法解析该URL，请确认这是一个有效的GitHub仓库地址', '加载失败');
+            }
+        }
+
+        // 格式化文件大小
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 B';
+
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // 格式化时间（秒 -> MM:SS）
+        function formatTime(seconds) {
+            if (isNaN(seconds) || seconds < 0) return '--:--';
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        // 带重试机制的fetch请求
+        async function fetchWithRetry(url, retries = 3, delay = 1000, options = {}) {
+            try {
+                const response = await fetch(url, options);
+                if (!response.ok && response.status === 403 && retries > 0) {
+                    // 遇到403错误且还有重试次数，等待后重试
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    return fetchWithRetry(url, retries - 1, delay * 2, options);
+                }
+                return response;
+            } catch (error) {
+                if (retries > 0 && error.name !== 'AbortError') {
+                    // 网络错误，等待后重试（中止错误不重试）
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    return fetchWithRetry(url, retries - 1, delay * 2, options);
+                }
+                throw error;
+            }
+        }
+
+        async function probeCors(url, call) {
+            const probe = await fetch(url, { method: 'HEAD', mode: 'no-cors' });
+            call(probe.type);
+            return probe.type;
+        }
+
+        // 带进度的文件下载函数
+        async function downloadFileWithProgress(url, abortSignal, onProgress) {
+            try {
+                // 发起请求
+                const response = await fetch(url, { signal: abortSignal });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                // 获取总大小（如果响应头提供）
+                const contentLength = response.headers.get('Content-Length');
+                const total = contentLength ? parseInt(contentLength, 10) : 0;
+
+                // 检查是否支持流式处理
+                if (!response.body) {
+                    // 不支持流式处理，直接获取完整数据
+                    const data = await response.arrayBuffer();
+                    progressCallback(100); // 进度设为100%
+                    return { data, size: total };
+                }
+
+                // 支持流式处理，创建读取器
+                const reader = response.body.getReader();
+                const chunks = [];
+                let downloaded = 0;
+
+                // 循环读取数据块
+                while (true) {
+                    const { done, value } = await reader.read();
+
+                    // 如果完成，退出循环
+                    if (done) break;
+
+                    // 将数据块添加到数组
+                    chunks.push(value);
+                    downloaded += value.byteLength;
+
+                    // 计算并回调进度
+                    if (total > 0) {
+                        downloadedSize = downloaded;
+                        const progress = Math.round((downloaded / total) * 100);
+                        onProgress(progress);
+                    } else {
+                        // 如果无法获取总大小，每收到一个块就更新一次进度（但无法计算百分比）
+                        onProgress(null);
+                    }
+                }
+
+                // 合并所有数据块为一个ArrayBuffer
+                const combined = new Uint8Array(downloaded);
+                let offset = 0;
+
+                for (const chunk of chunks) {
+                    combined.set(chunk, offset);
+                    offset += chunk.byteLength;
+                }
+
+                // 转换为ArrayBuffer并返回
+                const data = combined.buffer;
+                onProgress(100); // 最后确保进度为100%
+
+                return { data, size: downloaded };
+
+            }
+            catch (error) {
+                try {
+                    probeCors(url, (type) => {
+                        if (type == 'opaque') {
+                            showNotification('error', `无法下载，可能是由于网站CORS设置而被拦截手动访问<br><a href="${url}" target="_blank">点击跳转</a>`);
+                        }
+                    })
+                }
+                catch (error2) {
+
+                };
+            };
+        }
+
+
+        // 开始计算处理速度
+        function startCalculatingSpeed() {
+            // 重置速度计算变量
+            lastDownloadedBytes = 0;
+            downloadSpeed = 0;
+
+            // 每秒计算一次处理速度
+            downloadSpeedInterval = setInterval(() => {
+                const currentBytes = downloadedSize;
+                downloadSpeed = currentBytes - lastDownloadedBytes;
+                lastDownloadedBytes = currentBytes;
+
+                // 更新UI显示
+                updateDownloadStats();
+            }, 1000);
+        }
+
+        // 停止计算处理速度
+        function stopCalculatingSpeed() {
+            if (downloadSpeedInterval) {
+                clearInterval(downloadSpeedInterval);
+                downloadSpeedInterval = null;
+            }
+        }
+
+        // 更新下载统计信息UI
+        function updateDownloadStats() {
+            // 更新文件大小信息
+            downloadSizeInfo.textContent = `${formatFileSize(downloadedSize)} / ${formatFileSize(totalDownloadSize)}`;
+
+            // 更新处理速度信息
+            downloadSpeedInfo.textContent = `${formatFileSize(downloadSpeed)}/s`;
+
+            // 计算并更新估计剩余时间
+            if (downloadSpeed > 0 && totalDownloadSize > downloadedSize) {
+                const remainingBytes = totalDownloadSize - downloadedSize;
+                const estimatedSeconds = remainingBytes / downloadSpeed;
+                estimatedTimeInfo.textContent = formatTime(estimatedSeconds);
+            } else {
+                estimatedTimeInfo.textContent = '--:--';
+            }
+        }
+
+        // 加载仓库文件列表（包含文件大小）
+        async function loadRepositoryFiles() {
+            const owner = ownerInput.value.trim();
+            const repo = repoInput.value.trim();
+            const branch = branchInput.value.trim() || 'main';
+
+            if (!owner || !repo) {
+                showNotification('error', '请输入用户名和仓库名', '加载失败');
+                return;
+            }
+
+            loadFilesBtn.disabled = true;
+            loadFilesBtn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i>加载中...';
+
+            try {
+                const mirror = getCurrentMirrorConfig();
+                const apiUrl = mirror.convert(owner, repo, branch, '', 'api', 'tree');
+
+                // 使用带重试机制的fetch调用API
+                const response = await fetchWithRetry(apiUrl);
+
+                if (!response.ok) {
+                    // 提供更详细的错误信息
+                    let errorMsg = `API请求失败: ${response.status} ${response.statusText}`;
+                    if (response.status === 404) {
+                        errorMsg += "\n仓库或分支不存在，请检查输入是否正确";
+                    } else if (response.status === 403) {
+                        errorMsg += "\n请求被限制，请稍后再试或更换镜像站";
+                    }
+                    throw new Error(errorMsg);
+                }
+
+                const data = await response.json();
+
+                if (!data.tree) {
+                    throw new Error('无法获取文件列表，可能是仓库为空或API响应格式错误');
+                }
+
+                // 过滤出文件（排除目录）并确保路径和大小正确
+                fileList = data.tree
+                    .filter(item => item.type === 'blob')
+                    .map(item => ({
+                        //path: fileTreeStructure ? fileTreeStructure.path ? `${fileTreeStructure.path}/${item.path}` : item.path : item.path,
+                        path: item.path,
+                        url: '', // 暂时不设置URL，下载时根据镜像站动态生成
+                        size: item.size || 0 // 文件大小（字节）
+                    }));
+
+                // 生成文件树结构，包含根目录
+                const rootDirName = `${owner}-${repo}-${branch}`;
+                fileTreeStructure = {
+                    directories: {},
+                    files: [],
+                    path: rootDirName,
+                    isExpanded: false,
+                    isRoot: true
+                };
+
+                // 填充根目录
+                fileList.forEach(file => {
+                    const parts = file.path.split('/');
+                    let current = fileTreeStructure;
+
+                    // 处理目录部分
+                    for (let i = 0; i < parts.length - 1; i++) {
+                        const dirName = parts[i];
+                        // 确保路径正确拼接
+                        const dirPath = current.path
+                            ? `${current.path}/${dirName}`
+                            : dirName;
+
+                        if (!current.directories[dirName]) {
+                            current.directories[dirName] = {
+                                directories: {},
+                                files: [],
+                                path: dirPath,
+                                isExpanded: false // 默认折叠子目录
+                            };
+                        }
+                        current = current.directories[dirName];
+                    }
+
+                    // 添加文件
+                    current.files.push(file);
+                });
+
+                // 生成当前仓库的唯一标识
+                currentRepoKey = `github_downloader_${owner}_${repo}_${branch}`;
+
+                // 加载保存的下载进度
+                loadDownloadProgress();
+
+                // 计算总文件大小
+                const totalSize = fileList.reduce((sum, file) => sum + file.size, 0);
+
+                // 添加到历史记录，确保传递文件总数和总大小
+                addToHistory(owner, repo, branch, fileList.length, totalSize);
+
+                // 显示文件列表和控制区域
+                fileListSection.classList.remove('hidden');
+                controlsSection.classList.remove('hidden');
+
+                // 渲染文件树
+                renderFileTree();
+
+                // 更新统计信息
+                updateStats();
+
+                showNotification('success', `${fileList.length} 个文件 (${formatFileSize(totalSize)})`, '成功加载');
+
+            } catch (error) {
+                console.error('加载文件列表失败:', error);
+                // 显示详细的错误信息
+                showNotification('error', `${error.message}\n\n请检查网络连接和仓库信息是否正确，或尝试更换镜像站`, '加载失败');
+            } finally {
+                loadFilesBtn.disabled = false;
+                loadFilesBtn.innerHTML = '<i class="fa fa-folder-open mr-2"></i>加载文件列表';
+            }
+        }
+
+        // 从localStorage加载下载进度
+        function loadDownloadProgress() {
+            try {
+                const savedProgress = localStorage.getItem(currentRepoKey);
+                downloadedFiles = savedProgress
+                    ? new Set(JSON.parse(savedProgress).downloaded || [])
+                    : new Set();
+            } catch (e) {
+                console.error('解析保存的进度失败:', e);
+                downloadedFiles = new Set();
+            }
+            selectedItems = new Set(); // 重置选中状态
+        }
+
+        // 保存下载进度到localStorage
+        function saveDownloadProgress() {
+            if (!currentRepoKey) return;
+
+            const progressData = {
+                downloaded: Array.from(downloadedFiles)
+            };
+
+            localStorage.setItem(currentRepoKey, JSON.stringify(progressData));
+            updateStats();
+
+            // 更新历史记录中的下载数量
+            updateHistoryDownloadCount();
+        }
+
+        // 更新历史记录中的下载数量
+        function updateHistoryDownloadCount() {
+            if (!currentRepoKey) return;
+
+            // 从当前仓库标识解析owner, repo, branch
+            const match = currentRepoKey.match(/github_downloader_([^_]+)_([^_]+)_(.+)/);
+            if (!match) return;
+
+            const [, owner, repo, branch] = match;
+
+            // 查找对应的历史记录并更新
+            const index = historyRecords.findIndex(
+                r => r.owner === owner && r.repo === repo && r.branch === branch
+            );
+
+            if (index !== -1) {
+                historyRecords[index].downloaded = downloadedFiles.size;
+                localStorage.setItem('githubDownloaderHistory', JSON.stringify(historyRecords));
+                renderHistoryList();
+            }
+        }
+
+        // 检查目录是否完全选中
+        function isDirectoryFullySelected(dirPath) {
+            const files = getFilesInDirectory(dirPath);
+            return files.every(file => selectedItems.has(file.path));
+        }
+
+        // 检查目录是否部分选中
+        function isDirectoryPartiallySelected(dirPath) {
+            const files = getFilesInDirectory(dirPath);
+            const selectedCount = files.filter(file => selectedItems.has(file.path)).length;
+            return selectedCount > 0 && selectedCount < files.length;
+        }
+
+        // 渲染文件树（显示文件大小）
+        function renderFileTree() {
+            if (!fileTreeStructure || (Object.keys(fileTreeStructure.directories).length === 0 && fileTreeStructure.files.length === 0)) {
+                fileTree.innerHTML = `
+                                                                                                <div class="text-center text-gray-500 py-8">
+                                                                                                    <i class="fa fa-folder-open text-2xl mb-2"></i>
+                                                                                                    <p>仓库中没有找到文件</p>
+                                                                                                </div>
+                                                                                            `;
+                return;
+            }
+
+            // 生成HTML，从根目录开始
+            fileTree.innerHTML = generateTreeHtml(fileTreeStructure, 0);
+
+            // 为目录展开按钮添加事件
+            document.querySelectorAll('.directory-expander').forEach(expander => {
+                expander.addEventListener('click', (e) => {
+                    const dirPath = e.target.closest('.directory-item').querySelector('.tree-checkbox').dataset.path;
+                    toggleDirectoryExpansion(dirPath);
+                    e.stopPropagation();
+                });
+            });
+
+            // 为复选框添加事件
+            document.querySelectorAll('.tree-checkbox').forEach(checkbox => {
+                const isPartiallySelected = checkbox.dataset.indeterminate === 'true';
+                checkbox.indeterminate = isPartiallySelected;
+                checkbox.addEventListener('change', handleItemSelectionChange);
+            });
+
+
+        }
+
+        // 切换目录展开/折叠状态
+        function toggleDirectoryExpansion(dirPath) {
+            // 递归查找目录并切换状态
+            function findAndToggle(node) {
+                if (node.path === dirPath) {
+                    node.isExpanded = !node.isExpanded;
+                    return true;
+                }
+
+                for (const dir of Object.values(node.directories)) {
+                    if (findAndToggle(dir)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            findAndToggle(fileTreeStructure);
+            renderFileTree(); // 重新渲染以更新UI
+        }
+
+        // 展开所有目录
+        function expandAllDirectories() {
+            function expand(node) {
+                node.isExpanded = true;
+                Object.values(node.directories).forEach(dir => expand(dir));
+            }
+
+            expand(fileTreeStructure);
+            renderFileTree();
+        }
+
+        // 收起所有目录
+        function collapseAllDirectories() {
+            function collapse(node) {
+                // 保持根目录展开
+                if (!node.isRoot) {
+                    node.isExpanded = false;
+                }
+                Object.values(node.directories).forEach(dir => collapse(dir));
+            }
+
+            collapse(fileTreeStructure);
+            renderFileTree();
+        }
+
+        // 展开包含已下载文件的目录
+        function expandDownloadedDirectories() {
+            // 首先收起所有目录
+            collapseAllDirectories();
+
+            // 找出包含已下载文件的目录
+            const directoriesWithDownloaded = new Set();
+
+            downloadedFiles.forEach(filePath => {
+                const pathParts = filePath.split('/');
+                pathParts.pop(); // 移除文件名
+
+                let currentPath = '';
+                pathParts.forEach(part => {
+                    currentPath = currentPath ? `${currentPath}/${part}` : part;
+
+                    directoriesWithDownloaded.add(currentPath);
+                });
+            });
+
+            // 展开这些目录
+            function expandIfNeeded(node) {
+                const path = node.path.slice(node.path.indexOf('/') + 1);
+                if (directoriesWithDownloaded.has(path)) {
+                    node.isExpanded = true;
+                }
+                Object.values(node.directories).forEach(dir => expandIfNeeded(dir));
+            }
+
+            expandIfNeeded(fileTreeStructure);
+            renderFileTree();
+
+            showNotification('info', '已展开包含已下载文件的目录');
+        }
+
+        // 搜索文件
+        function searchDownloadedFiles() {
+            const searchTerm = searchDownloadedInput.value.trim().toLowerCase();
+            // 筛选出选中的文件（排除目录）
+            const selectedFiles = fileList.filter(file =>
+                selectedItems.has(file.path)
+            );
+            const selectedPaths = selectedFiles.map(file => file.path);
+            searchHighlightedPaths.clear();
+
+            if (!searchTerm) {
+                renderFileTree(); // 清除高亮
+                return;
+            }
+            let prefix = null;
+            let searchTermContent = searchTerm;
+            const searchParts = searchTerm.split(': ');
+            const hasPrifix = searchParts.length != 1;
+            if (hasPrifix) {
+                prefix = searchParts.slice(0, searchParts.length - 1);
+                searchTermContent = searchParts[searchParts.length - 1];
+            }
+            // 找出匹配的文件
+            const matchedFiles = fileList.filter(file => {
+                let matched = true;
+                if (prefix) {
+                    if (prefix.includes('downloaded')) matched &= downloadedFiles.has(file.path);
+                    if (prefix.includes('not-downloaded')) matched &= (!downloadedFiles.has(file.path));
+                    if (prefix.includes('selected')) matched &= selectedPaths.includes(file.path);
+                    if (prefix.includes('not-selected')) matched &= (!selectedPaths.includes(file.path));
+                }
+                return matched &&
+                    (file.path.toLowerCase().includes(searchTermContent) ||
+                        file.path.split('/').pop().toLowerCase().includes(searchTermContent))
+            });
+
+            if (matchedFiles.length === 0) {
+                showNotification('info', `未找到包含"${searchTerm}"的已下载文件`);
+                return;
+            }
+
+            // 记录需要高亮的文件路径
+            matchedFiles.forEach(file => searchHighlightedPaths.add(file.path));
+
+            // 展开包含匹配文件的目录
+            const directoriesToExpand = new Set();
+
+            matchedFiles.forEach(file => {
+                const pathParts = file.path.split('/');
+                pathParts.pop(); // 移除文件名
+
+                let currentPath = '';
+                pathParts.forEach(part => {
+                    currentPath = currentPath ? `${currentPath}/${part}` : part;
+                    directoriesToExpand.add(currentPath);
+                });
+            });
+
+            // 展开这些目录
+            function expandIfNeeded(node) {
+                const path = node.path.slice(node.path.indexOf('/') + 1);
+                if (directoriesToExpand.has(path)) {
+                    node.isExpanded = true;
+                }
+                Object.values(node.directories).forEach(dir => expandIfNeeded(dir));
+            }
+
+            expandIfNeeded(fileTreeStructure);
+
+            // 重新渲染以显示高亮
+            renderFileTree();
+
+            showNotification('success', `找到 ${matchedFiles.length} 个匹配的已下载文件`);
+        }
+
+        // 生成树HTML（包含文件大小和根目录标识）
+        function generateTreeHtml(node, level = 0) {
+            let html = '';
+            const indent = level * 20;
+
+            // 根目录特殊处理
+            const dirClass = node.isRoot ? 'root-directory' : '';
+
+            // 处理目录
+            const dirs = Object.keys(node.directories).sort();
+            dirs.forEach(dirName => {
+                const dirNode = node.directories[dirName];
+                const fullySelected = isDirectoryFullySelected(dirNode.path);
+                const partiallySelected = isDirectoryPartiallySelected(dirNode.path);
+                const expanderIcon = dirNode.isExpanded ? 'fa-chevron-down' : 'fa-chevron-right';
+
+                // 计算目录总大小
+                const dirSize = calculateDirectorySize(dirNode);
+
+                html += `
+                                                                                                <div class="directory-item">
+                                                                                                    <div class="tree-item ${fullySelected || partiallySelected ? 'tree-item-selected' : ''}" style="padding-left: ${indent}px">
+                                                                                                        <input type="checkbox" class="tree-checkbox custom-checkbox mr-1"
+                                                                                                               data-type="directory"
+                                                                                                               data-path="${dirNode.path}"
+                                                                                                               ${fullySelected ? 'checked' : ''}
+                                                                                                               data-indeterminate="${partiallySelected}">
+                                                                                                        <div class="directory-expander">
+                                                                                                            <i class="fa ${expanderIcon}"></i>
+                                                                                                        </div>
+                                                                                                        <i class="fa fa-folder text-yellow-500 mr-2"></i>
+                                                                                                        <span class="font-medium ${dirNode.isRoot ? 'root-directory' : ''}">${dirName}</span>
+                                                                                                        <span class="file-size">${formatFileSize(dirSize)}</span>
+                                                                                                    </div>
+                                                                                                    <div class="directory-content ${dirNode.isExpanded ? '' : 'hidden'}">
+                                                                                                        ${generateTreeHtml(dirNode, level + 1)}
+                                                                                                    </div>
+                                                                                                </div>
+                                                                                            `;
+            });
+
+            // 处理文件
+            node.files.sort((a, b) => a.path.localeCompare(b.path)).forEach(file => {
+                const isSelected = selectedItems.has(file.path);
+                const isDownloaded = downloadedFiles.has(file.path);
+                const fileName = file.path.split('/').pop();
+                const isHighlighted = searchHighlightedPaths.has(file.path);
+
+                html += `
+                                                                                                <div class="tree-item ${isSelected ? 'tree-item-selected' : ''}" style="padding-left: ${indent + 16}px">
+                                                                                                    <input type="checkbox" class="tree-checkbox custom-checkbox mr-2"
+                                                                                                           data-type="file"
+                                                                                                           data-path="${file.path}"
+                                                                                                           ${isSelected ? 'checked' : ''}
+                                                                                                           ${isDownloaded ? 'data-downloaded="true"' : ''}>
+                                                                                                    <i class="fa fa-file-o mr-2 text-gray-500"></i>
+                                                                                                    <span class="text-sm truncate max-w-[calc(100%-120px)] ${isHighlighted ? 'search-highlight' : ''}" title="${file.path}">${fileName}</span>
+                                                                                                    <span class="file-size">${formatFileSize(file.size)}</span>
+                                                                                                    ${isDownloaded ? '<i class="fa fa-check-circle text-success ml-2"></i>' : ''}
+                                                                                                </div>
+                                                                                            `;
+            });
+            return html;
+        }
+
+        // 计算目录总大小
+        function calculateDirectorySize(node) {
+            let size = 0;
+
+            // 加上所有文件大小
+            node.files.forEach(file => {
+                size += file.size;
+            });
+
+            // 加上所有子目录大小
+            Object.values(node.directories).forEach(dir => {
+                size += calculateDirectorySize(dir);
+            });
+
+            return size;
+        }
+
+        // 获取目录下的所有文件路径
+        function getFilesInDirectory(dirPath) {
+            const files = [];
+
+            // 递归查找目录下的所有文件
+            function findFiles(node) {
+                node.files.forEach(file => files.push(file));
+                Object.values(node.directories).forEach(childDir => findFiles(childDir));
+            }
+
+            // 找到对应的目录节点
+            function findDirectory(node, targetPath) {
+                if (node.path === targetPath) {
+                    findFiles(node);
+                    return true;
+                }
+
+                for (const dir of Object.values(node.directories)) {
+                    if (findDirectory(dir, targetPath)) return true;
+                }
+                return false;
+            }
+
+            findDirectory(fileTreeStructure, dirPath);
+            return files;
+        }
+
+        // 获取所有子目录路径
+        function getSubdirectories(dirPath) {
+            const dirs = [];
+
+            function findDirs(node) {
+                dirs.push(node.path);
+                Object.values(node.directories).forEach(childDir => findDirs(childDir));
+            }
+
+            function findDirectory(node, targetPath) {
+                if (node.path === targetPath) {
+                    findDirs(node);
+                    return true;
+                }
+
+                for (const dir of Object.values(node.directories)) {
+                    if (findDirectory(dir, targetPath)) return true;
+                }
+                return false;
+            }
+
+            findDirectory(fileTreeStructure, dirPath);
+            return dirs;
+        }
+
+        // 获取选中文件的总大小
+        function getSelectedFilesTotalSize() {
+            let totalSize = 0;
+
+            // 筛选出选中的文件（排除目录）
+            const selectedFiles = fileList.filter(file =>
+                selectedItems.has(file.path) && !downloadedFiles.has(file.path)
+            );
+
+            selectedFiles.forEach(file => {
+                totalSize += file.size;
+            });
+            return totalSize;
+        }
+
+        // 处理项目选择变化 - 增加单文件夹反选功能
+        function handleItemSelectionChange(e) {
+            const type = e.target.dataset.type;
+            const path = e.target.dataset.path;
+            const isChecked = e.target.checked;
+            const isIndeterminate = e.target.indeterminate;
+
+            // 对于目录处理
+            if (type === 'directory') {
+                // 如果是部分选中状态（减号），点击时取消所有选择
+                if (isIndeterminate) {
+                    const files = getFilesInDirectory(path);
+                    const subdirs = getSubdirectories(path);
+
+                    // 取消所有子文件和子目录的选中状态
+                    files.forEach(file => selectedItems.delete(file.path));
+                    subdirs.forEach(dirPath => selectedItems.delete(dirPath));
+
+                    // 更新父目录状态
+                    uncheckParentDirectoriesIfNeeded(path);
+                }
+                // 正常选中状态
+                else if (isChecked) {
+                    // 选中目录时，选中所有子文件和子目录，并选中所有父目录
+                    const files = getFilesInDirectory(path);
+                    const subdirs = getSubdirectories(path);
+
+                    files.forEach(file => selectedItems.add(file.path));
+                    subdirs.forEach(dirPath => selectedItems.add(dirPath));
+                    selectParentDirectories(path);
+                }
+                // 未选中状态
+                else {
+                    // 取消选中目录时，取消所有子文件和子目录的选中状态
+                    const files = getFilesInDirectory(path);
+                    const subdirs = getSubdirectories(path);
+
+                    files.forEach(file => selectedItems.delete(file.path));
+                    subdirs.forEach(dirPath => selectedItems.delete(dirPath));
+                    uncheckParentDirectoriesIfNeeded(path);
+                }
+            }
+            // 对于文件处理
+            else {
+                if (isChecked) {
+                    selectedItems.add(path);
+                    selectParentDirectories(path);
+                } else {
+                    selectedItems.delete(path);
+                    uncheckParentDirectoriesIfNeeded(path);
+                }
+            }
+
+            renderFileTree();
+            updateStats();
+        }
+
+        // 选中所有父目录
+        function selectParentDirectories(filePath) {
+            const parts = filePath.split('/');
+            let currentPath = '';
+
+            for (let i = 0; i < parts.length - 1; i++) {
+                currentPath = i === 0 ? parts[i] : `${currentPath}/${parts[i]}`;
+                selectedItems.add(currentPath);
+            }
+        }
+
+        // 如果子文件都未选中，取消父目录的选中状态
+        function uncheckParentDirectoriesIfNeeded(filePath) {
+            const parts = filePath.split('/');
+            let currentPath = '';
+
+            // 从文件所在目录向上检查
+            for (let i = 0; i < parts.length - 1; i++) {
+                currentPath = i === 0 ? parts[i] : `${currentPath}/${parts[i]}`;
+
+                // 获取该目录下的所有文件
+                const filesInDir = getFilesInDirectory(currentPath);
+
+                // 检查是否还有选中的文件
+                const hasSelectedFiles = filesInDir.some(file => selectedItems.has(file.path));
+
+                if (!hasSelectedFiles) {
+                    selectedItems.delete(currentPath);
+                } else {
+                    break; // 如果有选中的文件，停止向上检查
+                }
+            }
+        }
+
+        // 计算统计信息
+        function calculateStats() {
+            // 计算文件夹数量
+            const folderCount = countDirectories(fileTreeStructure);
+
+            // 计算已下载文件数量和大小
+            const downloadedFilesList = fileList.filter(file => downloadedFiles.has(file.path));
+            const downloadedCount = downloadedFilesList.length;
+            const downloadedSize = downloadedFilesList.reduce((sum, file) => sum + file.size, 0);
+
+            // 计算选中项目数量（只算文件）和大小
+            const selectedFilesList = fileList.filter(file => selectedItems.has(file.path));
+            const selectedCount = selectedFilesList.length;
+            const selectedSize = selectedFilesList.reduce((sum, file) => sum + file.size, 0);
+
+            // 计算总文件大小
+            const totalSize = fileList.reduce((sum, file) => sum + file.size, 0);
+
+            return {
+                fileCount: fileList.length,
+                folderCount,
+                selectedCount,
+                selectedSize,
+                downloadedCount,
+                downloadedSize,
+                totalSize
+            };
+        }
+
+        // 统计目录数量
+        function countDirectories(node) {
+            let count = Object.keys(node.directories).length;
+            Object.values(node.directories).forEach(dir => {
+                count += countDirectories(dir);
+            });
+            return count;
+        }
+
+        // 更新统计信息UI
+        function updateStats() {
+            const stats = calculateStats();
+            fileCountBadge.textContent = `${stats.fileCount}个文件`;
+            folderCountBadge.textContent = `${stats.folderCount}个文件夹`;
+            selectedCountBadge.textContent = `已选择${stats.selectedCount}个`;
+            downloadedCountBadge.textContent = `已下载${stats.downloadedCount}个`;
+            totalSizeBadge.textContent = `总大小: ${formatFileSize(stats.totalSize)}`;
+        }
+
+        // 全选所有项目
+        function selectAllItems() {
+            selectedItems.clear();
+
+            // 添加所有文件
+            fileList.forEach(file => selectedItems.add(file.path));
+
+            // 添加所有目录
+            addAllDirectories(fileTreeStructure);
+
+            renderFileTree();
+            updateStats();
+        }
+
+        // 添加所有目录到选中集合
+        function addAllDirectories(node) {
+            if (node.path) { // 排除根节点
+                selectedItems.add(node.path);
+            }
+
+            // 递归处理子目录
+            Object.values(node.directories).forEach(dir => {
+                addAllDirectories(dir);
+            });
+        }
+
+        // 取消全选
+        function deselectAllItems() {
+            selectedItems.clear();
+            renderFileTree();
+            updateStats();
+        }
+
+        // 反选功能
+        function invertSelection() {
+            // 检查是否有选中的目录
+            const selectedDirs = Array.from(selectedItems).filter(path => {
+                // 检查路径是否对应一个目录
+                function isDirectory(path) {
+                    function findNode(node) {
+                        if (node.path === path) return true;
+                        for (const dir of Object.values(node.directories)) {
+                            if (findNode(dir)) return true;
+                        }
+                        return false;
+                    }
+                    return findNode(fileTreeStructure);
+                }
+                return isDirectory(path);
+            });
+
+            // 获取当前视图中所有可见的文件和目录
+            const allItems = new Set();
+
+            // 递归收集所有文件和目录路径
+            function collectAllItems(node) {
+                allItems.add(node.path); // 添加目录
+                node.files.forEach(file => allItems.add(file.path)); // 添加文件
+                Object.values(node.directories).forEach(dir => collectAllItems(dir));
+            }
+            collectAllItems(fileTreeStructure);
+
+            // 反选逻辑：选中未选中的，取消已选中的
+            allItems.forEach(path => {
+                if (selectedItems.has(path)) {
+                    selectedItems.delete(path);
+                } else {
+                    selectedItems.add(path);
+                }
+            });
+
+            // 重新计算父目录状态
+            updateParentDirectoryStates();
+
+            // 重新渲染和更新统计
+            renderFileTree();
+            updateStats();
+        }
+
+        // 更新父目录状态（用于反选后修正层级关系）
+        function updateParentDirectoryStates() {
+            // 递归更新目录状态
+            function updateDirectory(node) {
+                const files = getFilesInDirectory(node.path);
+                const fullySelected = files.every(file => selectedItems.has(file.path));
+                const partiallySelected = !fullySelected && files.some(file => selectedItems.has(file.path));
+
+                // 更新目录选中状态
+                if (fullySelected) {
+                    selectedItems.add(node.path);
+                } else if (partiallySelected) {
+                    selectedItems.add(node.path); // 部分选中也算选中状态
+                } else {
+                    selectedItems.delete(node.path);
+                }
+
+                // 递归处理子目录
+                Object.values(node.directories).forEach(dir => updateDirectory(dir));
+            }
+
+            // 从根目录开始更新
+            updateDirectory(fileTreeStructure);
+        }
+
+        // 全选所有文件夹
+        function selectAllFolders() {
+            selectedItems.clear();
+
+            // 添加所有目录和目录下的文件
+            addAllDirectoriesWithFiles(fileTreeStructure);
+
+            renderFileTree();
+            updateStats();
+        }
+
+        // 添加所有目录及其文件
+        function addAllDirectoriesWithFiles(node) {
+            if (node.path) { // 排除根节点
+                selectedItems.add(node.path);
+                node.files.forEach(file => selectedItems.add(file.path));
+            }
+
+            Object.values(node.directories).forEach(dir => {
+                addAllDirectoriesWithFiles(dir);
+            });
+        }
+
+        // 选择未下载的文件
+        function selectPendingItems() {
+            selectedItems.clear();
+
+            // 添加所有未下载的文件
+            fileList.forEach(file => {
+                if (!downloadedFiles.has(file.path)) {
+                    selectedItems.add(file.path);
+                }
+            });
+
+            // 自动选中包含未下载文件的目录
+            selectParentDirectoriesForPendingFiles();
+
+            renderFileTree();
+            updateStats();
+        }
+
+        // 选中包含未下载文件的目录
+        function selectParentDirectoriesForPendingFiles() {
+            // 收集所有未下载的文件
+            const pendingFiles = fileList
+                .filter(file => !downloadedFiles.has(file.path))
+                .map(file => file.path);
+
+            // 为每个未下载文件选中其父目录
+            pendingFiles.forEach(filePath => {
+                selectParentDirectories(filePath);
+            });
+        }
+
+        // 选择下载位置
+        async function chooseDownloadPath() {
+            try {
+                if (!supportsFileSystem) {
+                    showNotification('info', '您的浏览器不支持文件夹选择，将使用默认下载位置');
+                    return;
+                }
+
+                // 让用户选择保存目录
+                const handle = await window.showDirectoryPicker({
+                    mode: 'readwrite'
+                });
+
+                // 保存目录句柄和显示路径
+                rootDirectoryHandle = handle;
+
+                // 尝试获取显示名称/路径
+                lastDownloadPath = handle.name;
+                // 在支持的浏览器中，尝试获取更完整的路径信息
+                if (handle.queryPermission) {
+                    const permission = await handle.queryPermission({ mode: 'readwrite' });
+                    if (permission === 'granted' && handle.fullPath) {
+                        lastDownloadPath = handle.fullPath;
+                    }
+                }
+
+                // 更新UI并保存到本地存储
+                downloadPathDisplay.value = lastDownloadPath;
+                localStorage.setItem('githubDownloaderLastPath', lastDownloadPath);
+
+                showNotification('success', '下载位置已设置');
+            } catch (error) {
+                console.error('选择目录失败:', error);
+                if (error.name !== 'AbortError') {
+                    showNotification('error', '选择目录失败');
+                }
+            }
+        }
+
+        // 恢复上次的下载位置权限
+        async function requestDirectoryPermission() {
+            if (!supportsFileSystem || !lastDownloadPath) return false;
+
+            try {
+                // 如果已有句柄，检查权限
+                if (rootDirectoryHandle) {
+                    const permission = await rootDirectoryHandle.queryPermission({ mode: 'readwrite' });
+                    if (permission === 'granted') {
+                        return true;
+                    }
+
+                    // 请求权限
+                    const newPermission = await rootDirectoryHandle.requestPermission({ mode: 'readwrite' });
+                    return newPermission === 'granted';
+                } else {
+                    // 没有句柄，需要重新选择目录
+                    return false;
+                }
+            } catch (error) {
+                console.error('请求目录权限失败:', error);
+                return false;
+            }
+        }
+
+        // 添加到最近处理列表
+        function addToRecentFiles(filePath, status) {
+            const fileName = filePath.split('/').pop();
+            const statusClass = status === 'success' ? 'text-success' : 'text-danger';
+            const statusIcon = status === 'success' ? 'fa-check' : 'fa-times';
+
+            recentFiles.unshift({
+                path: filePath,
+                name: fileName,
+                status: status
+            });
+
+            // 限制最近文件列表长度
+            if (recentFiles.length > 5) {
+                recentFiles = recentFiles.slice(0, 5);
+            }
+
+            // 更新UI
+            renderRecentFiles();
+        }
+
+        // 渲染最近处理的文件列表
+        function renderRecentFiles() {
+            if (recentFiles.length === 0) {
+                recentFilesList.innerHTML = '<div class="text-gray-400 italic">暂无处理记录</div>';
+                return;
+            }
+
+            let html = '';
+            recentFiles.forEach(file => {
+                const statusClass = file.status === 'success' ? 'text-success' : 'text-danger';
+                const statusIcon = file.status === 'success' ? 'fa-check' : 'fa-times';
+
+                html += `
+                                                                                                <div class="file-progress-item">
+                                                                                                    <span class="truncate max-w-[80%]" title="${file.path}">${file.name}</span>
+                                                                                                    <i class="fa ${statusIcon} ${statusClass}"></i>
+                                                                                                </div>
+                                                                                            `;
+            });
+
+            recentFilesList.innerHTML = html;
+        }
+
+        // 创建文件夹结构
+        async function createDirectoryStructure(path) {
+            if (!rootDirectoryHandle) return null;
+
+            const parts = path.split('/');
+            let currentDir = rootDirectoryHandle;
+
+            for (const part of parts) {
+                try {
+                    currentDir = await currentDir.getDirectoryHandle(part, { create: true });
+                } catch (error) {
+                    console.error(`创建目录 ${part} 失败:`, error);
+                    throw error;
+                }
+            }
+
+            return currentDir;
+        }
+
+        // 获取所有需要创建的目录
+        function getAllRequiredDirectories(files) {
+            const directories = new Set();
+
+            files.forEach(file => {
+                const pathParts = file.path.split('/');
+                pathParts.pop(); // 移除文件名
+
+                let currentPath = '';
+                pathParts.forEach(part => {
+                    currentPath = currentPath ? `${currentPath}/${part}` : part;
+                    directories.add(currentPath);
+                });
+            });
+
+            return Array.from(directories);
+        }
+
+        // 批量创建所有需要的文件夹
+        async function createAllDirectories(files) {
+            if (!supportsFileSystem || !rootDirectoryHandle) return;
+
+            try {
+                const directories = getAllRequiredDirectories(files);
+                if (directories.length === 0) return;
+
+                showNotification('info', `正在创建 ${directories.length} 个文件夹...`);
+
+                // 按层级排序，确保父目录先创建
+                directories.sort((a, b) => a.split('/').length - b.split('/').length);
+
+                // 逐个创建目录
+                for (const dirPath of directories) {
+                    await createDirectoryStructure(dirPath);
+                }
+
+                showNotification('success', `已创建 ${directories.length} 个文件夹`);
+            } catch (error) {
+                console.error('创建文件夹失败:', error);
+                throw new Error(`创建文件夹失败: ${error.message}`);
+            }
+        }
+
+        // 使用传统方式下载文件（不支持FileSystem时）
+        async function downloadFileTraditionally(file) {
+            return new Promise(async (resolve, reject) => {
+                try {
+                    const mirror = getCurrentMirrorConfig();
+                    const owner = ownerInput.value.trim();
+                    const repo = repoInput.value.trim();
+                    const branch = branchInput.value.trim() || 'main';
+
+                    // 构建文件下载URL
+                    let fileUrl = '';
+                    fileUrl = mirror.convert(owner, repo, branch, file.path, 'raw', '');
+
+                    // 使用Fetch API获取文件内容
+                    const response = await fetch(fileUrl);
+                    if (!response.ok) {
+                        throw new Error(`下载失败: ${response.statusText}`);
+                    }
+
+                    // 将文件内容转换为Blob对象
+                    const blob = await response.blob();
+
+                    // 创建指向Blob的URL
+                    const url = URL.createObjectURL(blob);
+
+                    // 设置文件名，如果有路径则添加前缀
+                    const pathParts = file.path.split('/');
+                    const fileName = pathParts.join('_'); // 用下划线代替斜杠
+
+                    // 创建a标签并触发下载
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = fileName; // 强制浏览器下载而非打开
+                    document.body.appendChild(a);
+                    a.click();
+
+                    // 清理
+                    setTimeout(() => {
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url); // 释放内存
+
+                        // 标记为已下载
+                        downloadedFiles.add(file.path);
+                        downloadedSize += file.size;
+                        saveDownloadProgress();
+
+                        resolve();
+                    }, 100);
+
+                } catch (error) {
+                    console.error(`传统方式下载失败:`, error);
+                    reject(error);
+                }
+            });
+        }
+
+        // 下载选中的项目
+        async function downloadSelectedItems() {
+            // 筛选出选中的文件（排除目录）
+            const filesToDownload = fileList.filter(file =>
+                selectedItems.has(file.path) && !downloadedFiles.has(file.path)
+            );
+
+            if (filesToDownload.length === 0) {
+                showNotification('info', '没有需要下载的文件（已选择的文件可能已全部下载）');
+                return;
+            }
+
+            if (isDownloading) {
+                showNotification('info', '正在下载中，请等待当前下载完成');
+                return;
+            }
+
+            // 计算总下载大小
+            totalDownloadSize = filesToDownload.reduce((sum, file) => sum + file.size, 0);
+            downloadedSize = 0;
+
+            // 处理下载位置
+            if (supportsFileSystem) {
+                // 检查是否已有下载位置
+                if (!rootDirectoryHandle || lastDownloadPath === '') {
+                    try {
+                        // 让用户选择保存目录
+                        rootDirectoryHandle = await window.showDirectoryPicker({
+                            mode: 'readwrite'
+                        });
+
+                        // 更新显示路径
+                        lastDownloadPath = rootDirectoryHandle.name;
+                        downloadPathDisplay.value = lastDownloadPath;
+                        localStorage.setItem('githubDownloaderLastPath', lastDownloadPath);
+                    } catch (error) {
+                        console.error('选择目录失败:', error);
+                        showNotification('error', '未选择保存目录，下载已取消');
+                        return;
+                    }
+                } else {
+                    // 已有路径，检查权限
+                    const hasPermission = await requestDirectoryPermission();
+                    if (!hasPermission) {
+                        try {
+                            // 请求权限失败，重新选择目录
+                            rootDirectoryHandle = await window.showDirectoryPicker({
+                                mode: 'readwrite'
+                            });
+
+                            // 更新显示路径
+                            lastDownloadPath = rootDirectoryHandle.name;
+                            downloadPathDisplay.value = lastDownloadPath;
+                            localStorage.setItem('githubDownloaderLastPath', lastDownloadPath);
+                        } catch (error) {
+                            console.error('重新选择目录失败:', error);
+                            showNotification('error', '下载已取消', '权限不足');
+                            return;
+                        }
+                    }
+                }
+
+                // 先创建所有需要的文件夹
+                try {
+                    await createAllDirectories(filesToDownload);
+                } catch (error) {
+                    console.error('创建文件夹结构失败:', error);
+                    showNotification('error', error.message);
+                    return;
+                }
+            } else {
+                // 不支持FileSystem API，使用传统下载方式
+                showNotification('info', `正在下载 ${filesToDownload.length} 个文件...`, '下载');
+            }
+
+            // 重置最近下载列表
+            recentFiles = [];
+            renderRecentFiles();
+
+            isDownloading = true;
+            downloadBtn.disabled = true;
+            zipDownloadBtn.disabled = true;
+            downloadBtn.classList.add('hidden');
+            zipDownloadBtn.classList.add('hidden');
+            cancelDownloadBtn.classList.remove('hidden');
+            progressSection.classList.remove('hidden');
+
+            let completed = 0;
+            const total = filesToDownload.length;
+            updateDownloadProgress(completed, total, '准备开始下载...');
+            updateDownloadStats();
+
+            // 开始计算下载速度
+            startCalculatingSpeed();
+
+            // 逐个下载文件
+            for (const file of filesToDownload) {
+                // 检查是否已取消
+                if (!isDownloading) break;
+
+                try {
+                    // 更新当前文件信息
+                    const fileName = file.path.split('/').pop();
+                    currentFileStatus.textContent = `${file.path} (${formatFileSize(file.size)})`;
+                    currentFileProgressBar.style.width = '0%';
+
+                    if (supportsFileSystem && rootDirectoryHandle) {
+                        // 使用FileSystem API下载
+
+                        // 为每个请求创建新的AbortController
+                        downloadAbortController = new AbortController();
+
+                        // 获取当前镜像配置
+                        const mirror = getCurrentMirrorConfig();
+                        const owner = ownerInput.value.trim();
+                        const repo = repoInput.value.trim();
+                        const branch = branchInput.value.trim() || 'main';
+
+                        // 构建文件下载URL
+                        let fileUrl = '';
+                        fileUrl = mirror.convert(owner, repo, branch, file.path, 'raw', '');
+
+                        // 下载文件，带进度回调
+                        const result = await downloadFileWithProgress(
+                            fileUrl,
+                            downloadAbortController.signal,
+                            (progress) => {
+                                // 更新单个文件的下载进度
+                                currentFileProgressBar.style.width = `${progress}%`;
+                            }
+                        );
+
+                        // 解析文件路径，创建对应的文件夹结构
+                        const pathParts = file.path.split('/');
+                        pathParts.pop(); // 移除文件名
+                        const directoryPath = pathParts.join('/');
+
+                        // 获取目标目录（已提前创建）
+                        let targetDir = rootDirectoryHandle;
+                        if (directoryPath) {
+                            targetDir = await createDirectoryStructure(directoryPath);
+                        }
+
+                        // 创建文件并写入内容
+                        const fileHandle = await targetDir.getFileHandle(fileName, { create: true });
+                        const writable = await fileHandle.createWritable();
+                        await writable.write(result.data);
+                        await writable.close();
+
+                    } else {
+                        // 使用传统方式下载
+                        await downloadFileTraditionally(file);
+                        currentFileProgressBar.style.width = '100%';
+                    }
+
+                    // 标记为已下载并保存进度
+                    downloadedFiles.add(file.path);
+                    saveDownloadProgress();
+
+                    // 添加到最近下载列表（成功）
+                    addToRecentFiles(file.path, 'success');
+
+                } catch (error) {
+                    console.error(`下载文件 ${file.path} 失败:`, error);
+
+                    // 添加到最近下载列表（失败）
+                    addToRecentFiles(file.path, 'failure');
+
+                    // 忽略中止错误
+                    if (error.name !== 'AbortError') {
+                        // 显示错误提示
+                        showNotification('error', `下载 ${file.path} 失败，尝试更换镜像站`);
+                    }
+                } finally {
+                    // 更新进度
+                    completed++;
+                    updateDownloadProgress(completed, total, `已完成 ${completed}/${total}`);
+                }
+            }
+
+            // 下载完成或取消
+            finishDownload();
+        }
+
+        // 检查是否全选了所有文件
+        function isAllFilesSelected() {
+            const selectedFilesCount = fileList.filter(file => selectedItems.has(file.path)).length;
+            return selectedFilesCount === fileList.length && fileList.length > 0;
+        }
+
+        // 获取当前选中站点的ZIP下载链接
+        function getZipUrl() {
+            const mirror = getCurrentMirrorConfig();
+            const owner = ownerInput.value.trim();
+            const repo = repoInput.value.trim();
+            const branch = branchInput.value.trim() || 'main';
+            return mirror.convert(owner, repo, branch, '', 'zip', '');
+        }
+
+        // 打包下载为ZIP
+        async function downloadAsZip() {
+            // 筛选出选中的文件（排除目录）
+            const filesToDownload = fileList.filter(file =>
+                selectedItems.has(file.path) && !downloadedFiles.has(file.path)
+            );
+
+            if (filesToDownload.length === 0) {
+                showNotification('info', '没有需要下载的文件（已选择的文件可能已全部下载）');
+                return;
+            }
+
+            if (isDownloading) {
+                showNotification('info', '正在处理中，请等待当前操作完成');
+                return;
+            }
+
+            // 检查是否全选了所有文件，如果是则使用当前站点提供的ZIP
+            if (isAllFilesSelected()) {
+                let res = confirm("是否直接下载源提供的压缩包？");
+                if (res == true) {
+
+                    const zipUrl = getZipUrl();
+                    const repoName = repoInput.value.trim();
+                    const branch = branchInput.value.trim() || 'main';
+                    const fileName = `${repoName}-${branch}.zip`;
+
+                    // 创建a标签并触发下载
+                    const a = document.createElement('a');
+                    a.href = zipUrl;
+                    a.download = fileName;
+                    document.body.appendChild(a);
+                    a.click();
+
+                    // 清理
+                    setTimeout(() => {
+                        document.body.removeChild(a);
+                    }, 100);
+
+                    showNotification('info', '正在下载ZIP包...');
+
+                    // 标记所有文件为已下载
+                    filesToDownload.forEach(file => {
+                        downloadedFiles.add(file.path);
+                    });
+                    saveDownloadProgress();
+                    renderFileTree();
+
+                    return;
+                }
+            }
+            // 初始化批次号和剩余文件列表
+            // 重置所有打包跟踪
+            allPackagedFiles = new Set();
+            packagedFiles = new Set();
+            currentBatchNumber = 1;
+            currentBatchNumber = 1;
+            remainingFiles = [...filesToDownload];
+
+            // 开始处理ZIP下载
+            processZipBatch();
+
+        }
+
+        // 处理ZIP下载批次
+        async function processZipBatch() {
+
+            // 重置当前批次的已打包文件跟踪
+            packagedFiles = new Set();
+
+            // 其余原有逻辑保持不变...
+            if (remainingFiles.length === 0) {
+                showNotification('success', '所有文件下载完成');
+                finishDownload();
+                return;
+            }
+
+            // 计算总下载大小
+            totalDownloadSize = remainingFiles.reduce((sum, file) => sum + file.size, 0);
+            downloadedSize = 0;
+
+            // 重置最近下载列表
+            recentFiles = [];
+            renderRecentFiles();
+
+            isDownloading = true;
+            downloadBtn.disabled = true;
+            zipDownloadBtn.disabled = true;
+            downloadBtn.classList.add('hidden');
+            zipDownloadBtn.classList.add('hidden');
+            cancelDownloadBtn.classList.remove('hidden');
+            partialZipBtn.classList.remove('hidden'); // 显示中途打包按钮
+            progressSection.classList.remove('hidden');
+
+            // 创建新的ZIP实例
+            zipInstance = new JSZip();
+
+            let completed = 0;
+            const total = remainingFiles.length;
+            updateDownloadProgress(completed, total, `批次 ${currentBatchNumber}: 准备开始打包...`);
+            updateDownloadStats();
+
+            // 开始计算处理速度
+            startCalculatingSpeed();
+
+            // 创建中止控制器
+            zipAbortController = new AbortController();
+
+            // 逐个下载文件并添加到ZIP
+            for (let i = 0; i < remainingFiles.length; i++) {
+                const file = remainingFiles[i];
+                // 检查是否已取消
+                if (!isDownloading) break;
+
+                try {
+                    // 更新当前文件信息
+                    const fileName = file.path.split('/').pop();
+                    currentFileStatus.textContent = `${file.path} (${formatFileSize(file.size)})`;
+                    currentFileProgressBar.style.width = '0%';
+
+                    // 获取当前镜像配置
+                    const mirror = getCurrentMirrorConfig();
+                    const owner = ownerInput.value.trim();
+                    const repo = repoInput.value.trim();
+                    const branch = branchInput.value.trim() || 'main';
+
+                    // 构建文件下载URL
+                    let fileUrl = '';
+                    fileUrl = mirror.convert(owner, repo, branch, file.path, 'raw', '');
+
+                    // 下载文件，带进度回调
+                    const result = await downloadFileWithProgress(
+                        fileUrl,
+                        zipAbortController.signal,
+                        (progress) => {
+                            // 更新单个文件的下载进度
+                            currentFileProgressBar.style.width = `${progress}%`;
+                        }
+                    );
+
+                    // 将文件添加到ZIP，保持目录结构
+                    zipInstance.file(file.path, result.data);
+
+                    // 标记为已下载并保存进度
+                    downloadedFiles.add(file.path);
+                    saveDownloadProgress();
+
+                    // 添加到最近处理列表（成功）
+                    addToRecentFiles(file.path, 'success');
+
+                } catch (error) {
+                    console.error(`下载文件 ${file.path} 失败:`, error);
+
+                    // 添加到最近处理列表（失败）
+                    addToRecentFiles(file.path, 'failure');
+
+                    // 忽略中止错误
+                    if (error.name !== 'AbortError') {
+                        // 显示错误提示
+                        showNotification('error', `下载 ${file.path} 失败，尝试更换镜像站`);
+                    }
+                } finally {
+                    // 更新进度
+                    completed++;
+                    updateDownloadProgress(completed, total, `批次 ${currentBatchNumber}: 已完成 ${completed}/${total}`);
+                }
+            }
+
+            // 如果未取消且有成功下载的文件，则生成ZIP并下载
+            if (isDownloading && completed > 0) {
+                // 生成当前批次的ZIP
+                await generateBatchZip();
+            }
+
+            // 更新剩余文件列表（移除已处理的文件）
+            remainingFiles = remainingFiles.slice(completed);
+
+            // 处理下一批次
+            if (isDownloading && remainingFiles.length > 0) {
+                currentBatchNumber++;
+                processZipBatch();
+            } else {
+                // 所有批次处理完成
+                finishDownload();
+            }
+        }
+
+        // 生成当前批次的ZIP文件
+        async function generateBatchZip() {
+            currentFileStatus.textContent = `正在生成批次 ${currentBatchNumber} 的ZIP文件...`;
+            currentFileProgressBar.style.width = '100%';
+            progressText.textContent = `正在生成批次 ${currentBatchNumber} 的ZIP文件...`;
+
+            try {
+                // 筛选出未在之前任何批次中打包过的文件
+                const filePaths = Object.keys(zipInstance.files);
+                const newFiles = filePaths.filter(path => !allPackagedFiles.has(path));
+
+                if (newFiles.length === 0) {
+                    showNotification('info', '本批次没有新文件需要打包');
+                    return;
+                }
+
+                // 仅添加新文件到最终ZIP
+                const finalZip = new JSZip();
+                for (const path of newFiles) {
+                    const file = zipInstance.files[path];
+                    const content = await file.async('arraybuffer');
+                    finalZip.file(path, content);
+
+                    // 添加到全局已打包集合
+                    allPackagedFiles.add(path);
+                }
+
+                // 生成ZIP文件
+                const content = await finalZip.generateAsync({ type: "blob" }, (metadata) => {
+                    const percent = Math.round(metadata.percent);
+                    progressBar.style.width = `${percent}%`;
+                    progressPercent.textContent = `${percent}%`;
+                });
+
+                // 创建下载链接
+                const url = URL.createObjectURL(content);
+                const a = document.createElement('a');
+                const repoName = repoInput.value.trim();
+                a.href = url;
+                a.download = `${repoName}-batch-${currentBatchNumber}.zip`;
+                document.body.appendChild(a);
+                a.click();
+
+                // 清理
+                setTimeout(() => {
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                }, 100);
+
+                showNotification('success', `批次 ${currentBatchNumber} 的ZIP文件已生成`);
+
+            } catch (error) {
+                console.error('生成ZIP文件失败:', error);
+                showNotification('error', `批次 ${currentBatchNumber} 的ZIP文件生成失败`);
+            }
+        }
+
+        // 新增：用于跟踪已打包的文件路径
+        let packagedFiles = new Set();
+        // 新增：跟踪整个下载过程中所有已打包的文件
+        let allPackagedFiles = new Set();
+
+        // 修改：创建部分ZIP时将文件添加到全局跟踪集合
+        async function createPartialZip() {
+            if (!zipInstance || !isDownloading) {
+                showNotification('warning', '未在ZIP下载过程中');
+                return;
+            }
+
+            // 显示正在打包提示
+            currentFileStatus.textContent = `正在打包已下载文件（批次 ${currentBatchNumber}）...`;
+            progressText.textContent = `正在打包已下载文件...`;
+
+            try {
+                const partialZip = new JSZip();
+                const filePaths = Object.keys(zipInstance.files);
+
+                if (filePaths.length === 0) {
+                    showNotification('info', '暂无已下载文件可打包');
+                    return;
+                }
+
+                // 筛选出本批次中未打包过的文件
+                const newFiles = filePaths.filter(path => !packagedFiles.has(path));
+
+                if (newFiles.length === 0) {
+                    showNotification('info', '所有已下载文件均已打包，无需重复处理');
+                    // 恢复进度显示
+                    const total = remainingFiles.length;
+                    const completed = total - remainingFiles.length;
+                    updateDownloadProgress(completed, total, `批次 ${currentBatchNumber}: 已完成 ${completed}/${total}`);
+                    currentFileStatus.textContent = '';
+                    return;
+                }
+
+                // 遍历所有新增文件，异步读取内容
+                for (const path of newFiles) {
+                    const file = zipInstance.files[path];
+                    const content = await file.async('arraybuffer');
+                    partialZip.file(path, content);
+
+                    // 标记为已打包（本批次和全局）
+                    packagedFiles.add(path);
+                    allPackagedFiles.add(path); // 添加到全局跟踪
+                }
+
+                // 生成ZIP文件
+                const content = await partialZip.generateAsync({ type: "blob" }, (metadata) => {
+                    const percent = Math.round(metadata.percent);
+                    progressBar.style.width = `${percent}%`;
+                    progressPercent.textContent = `${percent}%`;
+                });
+                // 添加时间格式化函数
+                function formatDateTimeForFilename() {
+                    const date = new Date();
+
+                    // 获取各时间部分并补零
+                    const year = date.getFullYear();
+                    const month = String(date.getMonth() + 1).padStart(2, '0'); // 月份从0开始
+                    const day = String(date.getDate()).padStart(2, '0');
+                    const hours = String(date.getHours()).padStart(2, '0');
+                    const minutes = String(date.getMinutes()).padStart(2, '0');
+                    const seconds = String(date.getSeconds()).padStart(2, '0');
+                    const milliseconds = String(date.getMilliseconds()).padStart(3, '0'); // 毫秒是3位数
+
+                    // 拼接成 y-m-d-h-m-s-ms 格式
+                    return `${year}${month}${day}-${hours}${minutes}${seconds}-${milliseconds}`;
+                }
+                // 创建下载链接并触发下载
+                const url = URL.createObjectURL(content);
+                const a = document.createElement('a');
+                const repoName = repoInput.value.trim();
+                a.href = url;
+                a.download = `${repoName}-partial-${currentBatchNumber}-${formatDateTimeForFilename()}.zip`;
+                document.body.appendChild(a);
+                a.click();
+
+                setTimeout(() => {
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                }, 100);
+
+                showNotification('success', `已将${newFiles.length}个新文件打包为ZIP`);
+
+            } catch (error) {
+                // 错误处理保持不变
+                console.error('生成部分ZIP失败:', error);
+                if (error.message.includes('async is not a function')) {
+                    showNotification('error', 'JSZip版本不兼容，请使用3.0+版本');
+                } else {
+                    showNotification('error', '打包已下载文件失败');
+                }
+            } finally {
+                // 恢复进度显示（保持不变）
+                const total = remainingFiles.length;
+                const completed = total - remainingFiles.length;
+                updateDownloadProgress(completed, total, `批次 ${currentBatchNumber}: 已完成 ${completed}/${total}`);
+                currentFileStatus.textContent = '';
+            }
+        }
+
+        // 更新下载进度UI
+        function updateDownloadProgress(completed, total, message) {
+            const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+            progressBar.style.width = `${percent}%`;
+            progressText.textContent = message;
+            progressPercent.textContent = `${percent}%`;
+        }
+
+        // 完成下载处理
+        function finishDownload() {
+            isDownloading = false;
+            stopCalculatingSpeed();
+            zipInstance = null; // 清空ZIP实例
+            partialZipBtn.classList.add('hidden'); // 隐藏中途打包按钮
+
+            // 更新UI状态
+            downloadBtn.disabled = false;
+            zipDownloadBtn.disabled = false;
+            downloadBtn.classList.remove('hidden');
+            zipDownloadBtn.classList.remove('hidden');
+            cancelDownloadBtn.classList.add('hidden');
+
+            // 重新渲染文件树以更新下载状态
+            renderFileTree();
+
+            // 显示完成信息
+            if (downloadedSize > 0) {
+                showNotification('success', `处理完成，共处理 ${formatFileSize(downloadedSize)}`);
+            }
+        }
+
+        // 取消下载
+        function cancelDownload() {
+            if (!isDownloading) return;
+
+            // 中止当前下载或ZIP打包
+            if (downloadAbortController) {
+                downloadAbortController.abort();
+                downloadAbortController = null;
+            }
+
+            if (zipAbortController) {
+                zipAbortController.abort();
+                zipAbortController = null;
+            }
+
+            // 标记为未在下载
+            isDownloading = false;
+            stopCalculatingSpeed();
+            zipInstance = null;
+            partialZipBtn.classList.add('hidden');
+
+            // 更新UI状态
+            downloadBtn.disabled = false;
+            zipDownloadBtn.disabled = false;
+            downloadBtn.classList.remove('hidden');
+            zipDownloadBtn.classList.remove('hidden');
+            cancelDownloadBtn.classList.add('hidden');
+
+            showNotification('info', '操作已取消');
+        }
+
+        // 清除下载进度
+        function clearDownloadProgress() {
+            if (isDownloading) {
+                showNotification('info', '请先停止当前操作');
+                return;
+            }
+
+            if (confirm('确定要清除所有下载进度记录吗？这不会删除已下载的文件。')) {
+                downloadedFiles.clear();
+                saveDownloadProgress();
+                renderFileTree();
+                updateStats();
+                showNotification('success', '下载进度已清除');
+            }
+        }
+
+        // 初始化应用
+        function initApp() {
+            detectBrowserFeatures();
+            initAppData();
+            initEventListeners();
+        }
+
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', initApp);
+    </script>
+</body>
+</html>

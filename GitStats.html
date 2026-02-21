@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Repository Stats</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.bootcss.com/font-awesome/5.13.0/css/all.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#2563eb',
+                        secondary: '#64748b',
+                        neutral: '#f1f5f9',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+            .table-hover tr:hover {
+                @apply bg-blue-50;
+            }
+            .scrollbar-thin {
+                scrollbar-width: thin;
+            }
+            .scrollbar-thin::-webkit-scrollbar {
+                width: 4px;
+                height: 4px;
+            }
+            .scrollbar-thin::-webkit-scrollbar-thumb {
+                background-color: rgba(156, 163, 175, 0.5);
+                border-radius: 2px;
+            }
+            .title-link {
+                @apply text-[clamp(1.8rem,4vw,2.5rem)] font-bold text-gray-800 mb-3 inline-block;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-6xl">
+        <header class="mb-10 text-center">
+            <a href="https://github.com/howdy213/GitTools" target="_blank" class="title-link">
+                <i class="fa fa-github text-gray-700 mr-2"></i>GitHub Repository Stats
+            </a>
+            <p class="text-gray-600 max-w-2xl mx-auto">
+                Enter a GitHub username to view detailed statistics of their repositories
+            </p>
+        </header>
+
+        <div class="bg-white rounded-xl shadow-md p-6 mb-8">
+            <div class="flex flex-col sm:flex-row gap-4 items-center">
+                <label for="githubId" class="text-gray-700 font-medium w-full sm:w-auto">GitHub Username:</label>
+                <input 
+                    type="text" 
+                    id="githubId" 
+                    class="flex-grow px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary transition-all"
+                    placeholder="e.g., octocat"
+                >
+                <button 
+                    id="calculateBtn" 
+                    onclick="fetchGitHubStats()"
+                    class="bg-primary hover:bg-primary/90 text-white px-6 py-2 rounded-lg transition-all font-medium flex items-center gap-2"
+                >
+                    <i class="fa fa-calculator"></i> Calculate
+                </button>
+            </div>
+        </div>
+
+        <div id="loading" class="hidden text-center py-10">
+            <div class="inline-block animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-primary"></div>
+            <p class="mt-4 text-gray-600">Fetching repository data...</p>
+        </div>
+
+        <div id="error" class="hidden bg-red-50 border border-red-200 rounded-lg p-4 mb-6 text-red-700"></div>
+
+        <div id="results" class="hidden">
+            <div id="statsOutput" class="bg-white rounded-xl shadow-md overflow-hidden"></div>
+        </div>
+
+        <footer class="mt-12 text-center text-gray-500 text-sm">
+            <p>Note: This tool uses GitHub API which has rate limits (60 requests/hour for unauthenticated users).</p>
+        </footer>
+    </div>
+
+    <script>
+        // 获取DOM元素
+        const githubIdInput = document.getElementById('githubId');
+        const calculateBtn = document.getElementById('calculateBtn');
+        const loadingIndicator = document.getElementById('loading');
+        const errorElement = document.getElementById('error');
+        const resultsContainer = document.getElementById('results');
+        const statsOutput = document.getElementById('statsOutput');
+
+        /**
+         * 主函数：获取并展示GitHub统计数据
+         */
+        async function fetchGitHubStats() {
+            const githubId = githubIdInput.value.trim();
+            
+            // 输入验证
+            if (!githubId) {
+                showError('Please enter a GitHub username');
+                return;
+            }
+
+            // 重置状态
+            resetState();
+            showLoading();
+
+            try {
+                // 获取所有仓库数据
+                const repos = await getAllRepositories(githubId);
+                
+                if (repos.length === 0) {
+                    showError('No repositories found for this user');
+                    return;
+                }
+
+                // 处理并过滤仓库数据
+                const processedRepos = processRepositories(repos);
+                
+                // 渲染结果
+                renderResults(githubId, processedRepos);
+                showResults();
+            } catch (error) {
+                showError(error.message || 'An error occurred while fetching data');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        /**
+         * 获取用户所有仓库数据（处理分页）
+         */
+        async function getAllRepositories(githubId) {
+            const repos = [];
+            let page = 1;
+            const perPage = 100; // GitHub API最大每页数量
+            
+            while (true) {
+                const url = `https://api.github.com/users/${githubId}/repos?page=${page}&per_page=${perPage}`;
+                
+                try {
+                    const response = await fetch(url);
+                    
+                    // 处理API错误状态
+                    if (!response.ok) {
+                        if (response.status === 404) {
+                            throw new Error('User not found');
+                        } else if (response.status === 403) {
+                            throw new Error('Rate limit exceeded. Please try again later.');
+                        } else {
+                            throw new Error(`Failed to fetch data (HTTP status: ${response.status})`);
+                        }
+                    }
+                    
+                    const pageRepos = await response.json();
+                    
+                    // 如果当前页没有数据，说明已经获取完所有仓库
+                    if (pageRepos.length === 0) {
+                        break;
+                    }
+                    
+                    repos.push(...pageRepos);
+                    page++;
+                    
+                    // 添加延迟避免触发速率限制
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                } catch (error) {
+                    throw error;
+                }
+            }
+            
+            return repos;
+        }
+
+        /**
+         * 格式化日期为友好显示格式
+         */
+        function formatDate(dateString) {
+            const date = new Date(dateString);
+            return new Intl.DateTimeFormat('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric'
+            }).format(date);
+        }
+
+        /**
+         * 处理仓库数据：过滤fork的仓库并提取需要的信息
+         */
+        function processRepositories(repos) {
+            // 过滤非fork的仓库并提取所需字段
+            const filteredRepos = repos
+                .filter(repo => !repo.fork)
+                .map(repo => ({
+                    name: repo.name,
+                    stargazers_count: repo.stargazers_count,
+                    forks_count: repo.forks_count,
+                    html_url: repo.html_url,
+                    description: repo.description || 'No description',
+                    created_at: repo.created_at,
+                    updated_at: repo.updated_at,
+                    language: repo.language || 'Unknown'
+                }));
+            
+            // 按stars数量降序排序
+            return filteredRepos.sort((a, b) => b.stargazers_count - a.stargazers_count);
+        }
+
+        /**
+         * 渲染结果表格
+         */
+        function renderResults(githubId, repos) {
+            // 计算总计
+            const totals = repos.reduce((acc, repo) => {
+                acc.stars += repo.stargazers_count;
+                acc.forks += repo.forks_count;
+                return acc;
+            }, { stars: 0, forks: 0 });
+
+            // 构建表格HTML
+            let tableHtml = `
+                <div class="p-6 border-b border-gray-100 bg-gray-50">
+                    <h2 class="text-xl font-semibold text-gray-800">
+                        Repositories for 
+                        <a href="https://github.com/${githubId}" target="_blank" class="text-primary hover:underline">
+                            ${githubId} <i class="fa fa-external-link text-xs ml-1"></i>
+                        </a>
+                    </h2>
+                    <p class="text-gray-600 mt-1">Total repositories: ${repos.length} | Total stars: ${totals.stars} | Total forks: ${totals.forks}</p>
+                </div>
+                <div class="overflow-x-auto scrollbar-thin">
+                    <table class="w-full table-hover">
+                        <thead>
+                            <tr class="bg-gray-100">
+                                <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700 w-12">No.</th>
+                                <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700">Repository Name</th>
+                                <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700">Description</th>
+                                <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700">Language</th>
+                                <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700">
+                                    <i class="fa fa-star text-yellow-500 mr-1"></i> Stars
+                                </th>
+                                <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700">
+                                    <i class="fa fa-code-fork text-gray-600 mr-1"></i> Forks
+                                </th>
+                                <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700">Created</th>
+                                <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700">Updated</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+            `;
+
+            // 添加仓库数据行，包含序号
+            repos.forEach((repo, index) => {
+                tableHtml += `
+                    <tr class="border-b border-gray-100 hover:bg-blue-50 transition-colors">
+                        <td class="px-4 py-3 text-sm text-gray-600">${index + 1}</td>
+                        <td class="px-4 py-3 text-sm">
+                            <a href="${repo.html_url}" target="_blank" class="text-primary hover:underline font-medium">
+                                ${repo.name}
+                            </a>
+                        </td>
+                        <td class="px-4 py-3 text-sm text-gray-700 max-w-xs">${repo.description}</td>
+                        <td class="px-4 py-3 text-sm text-gray-700">${repo.language}</td>
+                        <td class="px-4 py-3 text-sm text-gray-700">${repo.stargazers_count}</td>
+                        <td class="px-4 py-3 text-sm text-gray-700">${repo.forks_count}</td>
+                        <td class="px-4 py-3 text-sm text-gray-700">${formatDate(repo.created_at)}</td>
+                        <td class="px-4 py-3 text-sm text-gray-700">${formatDate(repo.updated_at)}</td>
+                    </tr>
+                `;
+            });
+
+            tableHtml += `
+                        </tbody>
+                    </table>
+                </div>
+            `;
+
+            statsOutput.innerHTML = tableHtml;
+        }
+
+        /**
+         * 状态管理函数
+         */
+        function resetState() {
+            errorElement.classList.add('hidden');
+            resultsContainer.classList.add('hidden');
+        }
+
+        function showLoading() {
+            loadingIndicator.classList.remove('hidden');
+        }
+
+        function hideLoading() {
+            loadingIndicator.classList.add('hidden');
+        }
+
+        function showError(message) {
+            errorElement.textContent = message;
+            errorElement.classList.remove('hidden');
+        }
+
+        function showResults() {
+            resultsContainer.classList.remove('hidden');
+            // 滚动到结果区域
+            resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        // 添加回车键触发功能
+        githubIdInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                fetchGitHubStats();
+            }
+        });
+    </script>
+</body>
+</html>
