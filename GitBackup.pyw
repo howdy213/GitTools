@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-GitHub 仓库批量克隆/拉取工具（增强版）
+GitHub 仓库批量克隆/拉取工具
 - 命令行模式：python script.py <username> [--dir DIR] [--token TOKEN] [--color]
-- GUI 模式：python script.py（不带参数启动图形界面）
+              [--mode {code,release,both}]  [--releases]  (--releases 等效于 --mode both)
+- GUI 模式：python GitBackup.pyw
 """
 
 import os
@@ -18,7 +19,6 @@ from urllib.parse import urlparse
 
 # -------------------- 颜色支持（仅命令行）--------------------
 class Colors:
-    """ANSI 颜色代码，仅在支持颜色的终端使用"""
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'
     OKGREEN = '\033[92m'
@@ -28,10 +28,9 @@ class Colors:
     BOLD = '\033[1m'
 
 def supports_color():
-    """检测终端是否支持颜色"""
     if not sys.stdout.isatty():
         return False
-    if os.name == 'nt':  # Windows
+    if os.name == 'nt':
         try:
             import ctypes
             kernel32 = ctypes.windll.kernel32
@@ -68,7 +67,8 @@ def get_user_repos(username, token=None):
                 for repo in data:
                     repos.append({
                         "name": repo["name"],
-                        "clone_url": repo["clone_url"]
+                        "clone_url": repo["clone_url"],
+                        "full_name": repo["full_name"]
                     })
                 link_header = response.headers.get("Link")
                 if link_header and 'rel="next"' in link_header:
@@ -86,20 +86,130 @@ def get_user_repos(username, token=None):
             raise Exception(f"发生错误: {e}")
     return repos
 
-def run_git_command(cmd, cwd=None, output_callback=None):
-    """执行 Git 命令，隐藏子进程窗口（Windows）"""
+def get_latest_release_assets(full_name, token=None):
+    url = f"https://api.github.com/repos/{full_name}/releases/latest"
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
     try:
-        creationflags = 0
-        if sys.platform == 'win32':
-            creationflags = subprocess.CREATE_NO_WINDOW  # 0x08000000
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req) as response:
+            release = json.loads(response.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return []
+        raise Exception(f"获取 Release 失败 ({full_name}): {e}")
+    except Exception as e:
+        raise Exception(f"发生错误: {e}")
+
+    assets = []
+    for asset in release.get("assets", []):
+        name = asset["name"]
+        if name.lower() in ["source code (zip)", "source code (tar.gz)"]:
+            continue
+        assets.append({
+            "name": name,
+            "download_url": asset["browser_download_url"],
+            "size": asset.get("size", 0)  # 用于预估进度条最大值
+        })
+    return assets
+
+def download_asset(url, save_path, output_callback=None, progress_callback=None):
+    """
+    分块下载文件，支持进度回调。
+    progress_callback(bytes_downloaded, total_bytes) 若无 total_bytes 则 total_bytes 为 0
+    """
+    if os.path.exists(save_path):
+        if output_callback:
+            output_callback(f"  已存在，跳过: {os.path.basename(save_path)}")
+        if progress_callback:
+            # 快速完成通知
+            progress_callback(-1, -1)  # 信号：文件已存在，可隐藏进度条
+        return True
+
+    if output_callback:
+        output_callback(f"  下载: {os.path.basename(save_path)}")
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            total_size = resp.headers.get('Content-Length')
+            total_size = int(total_size) if total_size else 0
+            downloaded = 0
+            chunk_size = 8192
+            data_chunks = []
+            while True:
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                data_chunks.append(chunk)
+                downloaded += len(chunk)
+                if progress_callback:
+                    progress_callback(downloaded, total_size)
+            data = b''.join(data_chunks)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        with open(save_path, 'wb') as f:
+            f.write(data)
+        if progress_callback:
+            progress_callback(downloaded, total_size)  # 确保最终 100%
+        return True
+    except Exception as e:
+        if output_callback:
+            output_callback(f"  下载失败: {e}")
+        if progress_callback:
+            progress_callback(-1, -1)  # 错误信号
+        return False
+
+def download_latest_release(repo_info, base_dir, token=None, output_callback=None, progress_callback=None):
+    """下载仓库最新 Release 的非源码附件，统一保存到 base_dir/Release/仓库名/"""
+    repo_name = repo_info["name"]
+    full_name = repo_info.get("full_name")
+    if not full_name:
+        if output_callback:
+            output_callback(f"缺少仓库全名，跳过 Release: {repo_name}")
+        return True
+    if output_callback:
+        output_callback(f"--- 下载最新 Release 附件: {repo_name} ---")
+    try:
+        assets = get_latest_release_assets(full_name, token)
+    except Exception as e:
+        if output_callback:
+            output_callback(f"获取 Release 失败: {e}")
+        return False
+    if not assets:
+        if output_callback:
+            output_callback("  无符合条件的附件")
+        return True
+
+    # 一次性展示所有待下载文件名
+    if output_callback:
+        output_callback("  附件列表：")
+        for i, asset in enumerate(assets, 1):
+            output_callback(f"    {i}. {asset['name']}")
+
+    release_dir = os.path.join(base_dir, "Release", repo_name)
+    all_ok = True
+    for asset in assets:
+        save_path = os.path.join(release_dir, asset["name"])
+        # 包装进度回调，传递当前 asset 信息
+        def asset_progress(downloaded, total):
+            if progress_callback:
+                progress_callback(asset["name"], downloaded, total)
+        ok = download_asset(asset["download_url"], save_path,
+                            output_callback=output_callback,
+                            progress_callback=asset_progress)
+        if not ok:
+            all_ok = False
+    # 所有文件处理完后，重置进度条
+    if progress_callback:
+        progress_callback(None, -1, -1)  # 特殊信号：结束
+    return all_ok
+
+def run_git_command(cmd, cwd=None, output_callback=None):
+    try:
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         process = subprocess.Popen(
-            cmd,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            creationflags=creationflags
+            cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, creationflags=creationflags
         )
         output_lines = []
         for line in process.stdout:
@@ -108,16 +218,19 @@ def run_git_command(cmd, cwd=None, output_callback=None):
             if output_callback:
                 output_callback(line)
         process.wait()
-        if process.returncode != 0:
-            return False, "\n".join(output_lines)
-        return True, "\n".join(output_lines)
+        return process.returncode == 0, "\n".join(output_lines)
     except Exception as e:
         return False, str(e)
 
-def clone_or_pull(repo_info, base_dir, status_callback=None, output_callback=None):
+def clone_or_pull(repo_info, base_dir, status_callback=None, output_callback=None, stop_event=None):
     repo_name = repo_info["name"]
     repo_url = repo_info["clone_url"]
     local_path = os.path.normpath(os.path.join(base_dir, repo_name))
+
+    if stop_event and stop_event.is_set():
+        if status_callback:
+            status_callback(repo_name, "失败")
+        return False
 
     if status_callback:
         status_callback(repo_name, "处理中")
@@ -125,83 +238,43 @@ def clone_or_pull(repo_info, base_dir, status_callback=None, output_callback=Non
     if not os.path.exists(local_path):
         if output_callback:
             output_callback(f"克隆 {repo_url} 到 {local_path}")
-        success, output = run_git_command(["git", "clone", repo_url, local_path],
-                                          output_callback=output_callback)
-        if success:
-            if status_callback:
-                status_callback(repo_name, "成功")
-        else:
-            if status_callback:
-                status_callback(repo_name, "失败")
-        return success
+        success, _ = run_git_command(["git", "clone", repo_url, local_path], output_callback=output_callback)
     else:
         if not os.path.isdir(os.path.join(local_path, ".git")):
             if output_callback:
-                output_callback(f"跳过: {local_path} 不是一个 Git 仓库")
+                output_callback(f"跳过: {local_path} 不是 Git 仓库")
             if status_callback:
                 status_callback(repo_name, "跳过")
             return False
         if output_callback:
             output_callback(f"拉取 {local_path}")
-        success, output = run_git_command(["git", "pull"], cwd=local_path,
-                                          output_callback=output_callback)
-        if success:
-            if status_callback:
-                status_callback(repo_name, "成功")
-        else:
-            if status_callback:
-                status_callback(repo_name, "失败")
-        return success
+        success, _ = run_git_command(["git", "pull"], cwd=local_path, output_callback=output_callback)
 
-def process_repos(username, base_dir, token=None,
-                  status_callback=None, output_callback=None):
-    try:
-        if output_callback:
-            output_callback(f"正在获取用户 {username} 的仓库列表...")
-        repos = get_user_repos(username, token)
-    except Exception as e:
-        if output_callback:
-            output_callback(f"错误: {e}")
-        return False
-
-    if not repos:
-        if output_callback:
-            output_callback("没有找到任何仓库。")
-        return True
-
-    if output_callback:
-        output_callback(f"共找到 {len(repos)} 个仓库，开始处理...")
-
-    success_count = 0
-    fail_count = 0
-    for repo in repos:
-        ok = clone_or_pull(repo, base_dir,
-                           status_callback=status_callback,
-                           output_callback=output_callback)
-        if ok:
-            success_count += 1
-        else:
-            fail_count += 1
-
-    if output_callback:
-        output_callback(f"\n处理完成: {success_count} 成功, {fail_count} 失败")
-    return fail_count == 0
+    if success:
+        if status_callback:
+            status_callback(repo_name, "成功")
+    else:
+        if status_callback:
+            status_callback(repo_name, "失败")
+    return success
 
 # -------------------- 命令行模式 --------------------
 def main_cli():
-    parser = argparse.ArgumentParser(
-        description="批量克隆或拉取指定 GitHub 用户的所有仓库。"
-    )
+    parser = argparse.ArgumentParser(description="批量克隆或拉取指定 GitHub 用户的所有仓库。")
     parser.add_argument("username", help="GitHub 用户名")
-    parser.add_argument("-d", "--dir", default=".",
-                        help="本地存放仓库的根目录（默认当前目录）")
+    parser.add_argument("-d", "--dir", default=".", help="本地存放仓库的根目录（默认当前目录）")
     parser.add_argument("-t", "--token", help="GitHub 个人访问令牌")
-    parser.add_argument("--color", action="store_true",
-                        help="启用彩色输出（默认自动检测）")
+    parser.add_argument("--mode", choices=["code", "release", "both"], default="code",
+                        help="操作模式：code=仅代码同步，release=仅下载Release，both=代码+Release (默认: code)")
+    parser.add_argument("-r", "--releases", action="store_true",
+                        help="同时下载Release (等效于 --mode both)，若同时指定 --mode 则以此为准")
+    parser.add_argument("--color", action="store_true", help="启用彩色输出（默认自动检测）")
     args = parser.parse_args()
 
-    use_color = args.color or supports_color()
+    if args.releases and args.mode == "code":
+        args.mode = "both"
 
+    use_color = args.color or supports_color()
     base_dir = os.path.abspath(args.dir)
     if not os.path.exists(base_dir):
         try:
@@ -220,12 +293,19 @@ def main_cli():
         else:
             print(msg)
 
-    process_repos(args.username, base_dir, args.token,
-                  output_callback=colored_output)
+    try:
+        repos = get_user_repos(args.username, args.token)
+    except Exception as e:
+        sys.exit(f"错误: {e}")
+
+    for repo in repos:
+        if args.mode in ("code", "both"):
+            clone_or_pull(repo, base_dir, output_callback=colored_output)
+        if args.mode in ("release", "both"):
+            download_latest_release(repo, base_dir, args.token, output_callback=colored_output)
 
 # -------------------- GUI 模式 --------------------
 def main_gui():
-    # 隐藏控制台窗口（仅 Windows 且无命令行参数时）
     if sys.platform == 'win32' and len(sys.argv) == 1:
         try:
             import ctypes
@@ -241,32 +321,33 @@ def main_gui():
         def __init__(self, root):
             self.root = root
             self.root.title("GitHub 仓库批量克隆/拉取工具")
-            self.root.geometry("800x650")  # 增高以容纳配置区域
+            self.root.geometry("850x750")  # 增加高度以容纳进度条
 
             # 变量
             self.username_var = tk.StringVar()
             self.dir_var = tk.StringVar(value=os.getcwd())
             self.token_var = tk.StringVar()
-            # 配置复选框变量
+            self.mode_var = tk.StringVar(value="code")
             self.safe_dir_var = tk.BooleanVar(value=False)
             self.ssl_verify_var = tk.BooleanVar(value=True)
 
-            self.repo_status = {}
+            # 仓库数据与控件映射
+            self.repo_infos = {}
             self.repo_items = {}
+            self.stop_event = threading.Event()
+            self.is_running = False
 
-            # 创建界面
             self.create_widgets()
-
-            # 初始化配置状态
             self.update_config_status()
+            self.update_button_states()
 
-            # 用于线程间通信的队列
+            # 线程通信
             self.output_queue = queue.Queue()
             self.status_queue = queue.Queue()
             self.update_ui()
 
         def create_widgets(self):
-            # 输入区域
+            # ---------- 设置区域 ----------
             input_frame = ttk.LabelFrame(self.root, text="设置", padding=5)
             input_frame.pack(fill="x", padx=5, pady=5)
 
@@ -280,120 +361,142 @@ def main_gui():
             ttk.Label(input_frame, text="Token (可选):").grid(row=2, column=0, sticky="w", padx=5, pady=5)
             ttk.Entry(input_frame, textvariable=self.token_var, width=40, show="*").grid(row=2, column=1, padx=5, pady=5, sticky="we")
 
-            # 执行按钮
-            self.run_button = ttk.Button(input_frame, text="开始同步", command=self.start_sync)
-            self.run_button.grid(row=3, column=1, pady=10)
+            # 模式选择
+            mode_frame = ttk.LabelFrame(input_frame, text="操作模式", padding=5)
+            mode_frame.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+            ttk.Radiobutton(mode_frame, text="仅代码", variable=self.mode_var, value="code").pack(side="left", padx=5)
+            ttk.Radiobutton(mode_frame, text="仅 Release", variable=self.mode_var, value="release").pack(side="left", padx=5)
+            ttk.Radiobutton(mode_frame, text="代码 + Release", variable=self.mode_var, value="both").pack(side="left", padx=5)
 
-            # 配置区域（新增）
+            # 按钮控制栏
+            btn_frame = ttk.Frame(input_frame)
+            btn_frame.grid(row=4, column=1, pady=10, sticky="w")
+            self.fetch_button = ttk.Button(btn_frame, text="获取仓库列表", command=self.fetch_repos)
+            self.fetch_button.pack(side="left", padx=5)
+            self.start_button = ttk.Button(btn_frame, text="开始同步", command=self.start_sync, state="disabled")
+            self.start_button.pack(side="left", padx=5)
+            self.stop_button = ttk.Button(btn_frame, text="停止", command=self.stop_sync, state="disabled")
+            self.stop_button.pack(side="left", padx=5)
+            self.retry_button = ttk.Button(btn_frame, text="重试失败", command=self.retry_failed, state="disabled")
+            self.retry_button.pack(side="left", padx=5)
+
+            # ---------- Git 配置区域 ----------
             config_frame = ttk.LabelFrame(self.root, text="Git 全局配置", padding=5)
             config_frame.pack(fill="x", padx=5, pady=5)
 
-            self.safe_dir_cb = ttk.Checkbutton(
-                config_frame,
+            self.safe_dir_cb = ttk.Checkbutton(config_frame,
                 text="添加安全目录通配符 (safe.directory = '*')",
-                variable=self.safe_dir_var,
-                command=self.on_safe_directory_toggle
-            )
+                variable=self.safe_dir_var, command=self.on_safe_directory_toggle)
             self.safe_dir_cb.grid(row=0, column=0, sticky="w", padx=5, pady=2)
 
-            self.ssl_verify_cb = ttk.Checkbutton(
-                config_frame,
+            self.ssl_verify_cb = ttk.Checkbutton(config_frame,
                 text="启用 SSL 验证 (http.sslVerify)",
-                variable=self.ssl_verify_var,
-                command=self.on_ssl_verify_toggle
-            )
+                variable=self.ssl_verify_var, command=self.on_ssl_verify_toggle)
             self.ssl_verify_cb.grid(row=1, column=0, sticky="w", padx=5, pady=2)
 
-            # 主内容区域：左侧仓库列表，右侧日志
+            # ---------- 主面板 ----------
             main_panel = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
             main_panel.pack(fill="both", expand=True, padx=5, pady=5)
 
-            # 左侧列表
-            list_frame = ttk.LabelFrame(main_panel, text="仓库状态")
+            # 左侧仓库列表
+            list_frame = ttk.LabelFrame(main_panel, text="仓库列表")
             main_panel.add(list_frame, weight=1)
 
+            select_toolbar = ttk.Frame(list_frame)
+            select_toolbar.pack(fill="x", padx=2, pady=2)
+            ttk.Button(select_toolbar, text="全选", command=self.select_all).pack(side="left", padx=2)
+            ttk.Button(select_toolbar, text="取消全选", command=self.deselect_all).pack(side="left", padx=2)
+
             columns = ("status",)
-            self.tree = ttk.Treeview(list_frame, columns=columns, show="tree headings", height=15)
+            self.tree = ttk.Treeview(list_frame, columns=columns, show="tree headings",
+                                     selectmode="extended", height=15)
             self.tree.heading("#0", text="仓库名称")
             self.tree.heading("status", text="状态")
-            self.tree.column("#0", width=200)
-            self.tree.column("status", width=100, anchor="center")
+            self.tree.column("#0", width=180)
+            self.tree.column("status", width=80, anchor="center")
 
             tree_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
             self.tree.configure(yscrollcommand=tree_scroll.set)
             tree_scroll.pack(side="right", fill="y")
             self.tree.pack(side="left", fill="both", expand=True)
 
-            # 右侧日志
-            log_frame = ttk.LabelFrame(main_panel, text="详细日志")
-            main_panel.add(log_frame, weight=2)
+            # 右侧日志 + 进度条
+            right_frame = ttk.Frame(main_panel)
+            main_panel.add(right_frame, weight=2)
 
+            log_frame = ttk.LabelFrame(right_frame, text="详细日志")
+            log_frame.pack(fill="both", expand=True)
             self.output_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD)
             self.output_text.pack(fill="both", expand=True)
+
+            # 进度条区域
+            progress_frame = ttk.Frame(right_frame)
+            progress_frame.pack(fill="x", pady=5)
+            self.progress_label = ttk.Label(progress_frame, text="下载进度：")
+            self.progress_label.pack(side="left")
+            self.progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=300)
+            self.progress_bar.pack(side="left", fill="x", expand=True, padx=5)
 
         def browse_dir(self):
             directory = filedialog.askdirectory(initialdir=self.dir_var.get())
             if directory:
                 self.dir_var.set(directory)
 
-        # ---------- 配置相关方法 ----------
+        def select_all(self):
+            for item in self.tree.get_children():
+                self.tree.selection_add(item)
+
+        def deselect_all(self):
+            self.tree.selection_remove(self.tree.get_children())
+
+        def update_button_states(self):
+            if self.is_running:
+                self.fetch_button.config(state="disabled")
+                self.start_button.config(state="disabled")
+                self.stop_button.config(state="normal")
+                self.retry_button.config(state="disabled")
+            else:
+                has_list = len(self.tree.get_children()) > 0
+                self.fetch_button.config(state="normal")
+                self.start_button.config(state="normal" if has_list else "disabled")
+                self.stop_button.config(state="disabled")
+                self.retry_button.config(state="normal" if has_list else "disabled")
+
+        # ---------- 配置相关 ----------
         def update_config_status(self):
-            """从 git 全局配置读取当前状态，更新复选框"""
-            # 检查 safe.directory 是否包含 '*'
             try:
                 result = subprocess.run(
                     ["git", "config", "--global", "--get-all", "safe.directory"],
                     capture_output=True, text=True, check=False,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                 )
-                if result.returncode == 0:
-                    values = result.stdout.strip().split('\n')
-                    has_star = '*' in values
-                else:
-                    has_star = False
-                self.safe_dir_var.set(has_star)
-            except Exception as e:
-                print(f"获取 safe.directory 失败: {e}")
+                self.safe_dir_var.set('*' in result.stdout.strip().split('\n') if result.returncode == 0 else False)
+            except Exception:
                 self.safe_dir_var.set(False)
 
-            # 检查 http.sslVerify
             try:
                 result = subprocess.run(
                     ["git", "config", "--global", "--get", "http.sslVerify"],
                     capture_output=True, text=True, check=False,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                 )
-                if result.returncode == 0:
-                    value = result.stdout.strip().lower()
-                    ssl_enabled = (value == "true")
-                else:
-                    ssl_enabled = True  # 默认启用
-                self.ssl_verify_var.set(ssl_enabled)
-            except Exception as e:
-                print(f"获取 http.sslVerify 失败: {e}")
+                self.ssl_verify_var.set(result.stdout.strip().lower() == "true" if result.returncode == 0 else True)
+            except Exception:
                 self.ssl_verify_var.set(True)
 
-        def set_controls_state(self, state):
-            """统一设置交互控件的状态（normal/disabled）"""
-            self.run_button.config(state=state)
+        def set_config_controls_state(self, state):
             self.safe_dir_cb.config(state=state)
             self.ssl_verify_cb.config(state=state)
 
         def on_safe_directory_toggle(self):
-            """处理安全目录复选框点击"""
-            target = self.safe_dir_var.get()  # True=添加，False=移除
-            self.set_controls_state("disabled")
+            target = self.safe_dir_var.get()
+            self.set_config_controls_state("disabled")
             old_state = not target
             try:
-                if target:
-                    cmd = ["git", "config", "--global", "--add", "safe.directory", "*"]
-                else:
-                    cmd = ["git", "config", "--global", "--unset-all", "safe.directory"]
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True, text=True, check=False,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                )
+                cmd = ["git", "config", "--global", "--add", "safe.directory", "*"] if target else \
+                      ["git", "config", "--global", "--unset-all", "safe.directory"]
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False,
+                                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
                 if result.returncode != 0:
                     self.safe_dir_var.set(old_state)
                     messagebox.showerror("错误", f"执行 Git 命令失败:\n{result.stderr}")
@@ -403,21 +506,17 @@ def main_gui():
                 self.safe_dir_var.set(old_state)
                 messagebox.showerror("错误", f"发生异常:\n{e}")
             finally:
-                self.set_controls_state("normal")
+                self.set_config_controls_state("normal")
 
         def on_ssl_verify_toggle(self):
-            """处理 SSL 验证复选框点击"""
-            target = self.ssl_verify_var.get()  # True=启用，False=禁用
-            self.set_controls_state("disabled")
+            target = self.ssl_verify_var.get()
+            self.set_config_controls_state("disabled")
             old_state = not target
             try:
                 value = "true" if target else "false"
                 cmd = ["git", "config", "--global", "http.sslVerify", value]
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True, text=True, check=False,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                )
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False,
+                                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
                 if result.returncode != 0:
                     self.ssl_verify_var.set(old_state)
                     messagebox.showerror("错误", f"执行 Git 命令失败:\n{result.stderr}")
@@ -427,20 +526,62 @@ def main_gui():
                 self.ssl_verify_var.set(old_state)
                 messagebox.showerror("错误", f"发生异常:\n{e}")
             finally:
-                self.set_controls_state("normal")
+                self.set_config_controls_state("normal")
 
-        # ---------- 同步功能 ----------
-        def start_sync(self):
+        # ---------- 获取仓库列表 ----------
+        def fetch_repos(self):
             username = self.username_var.get().strip()
-            base_dir = self.dir_var.get().strip()
-            token = self.token_var.get().strip() or None
-
             if not username:
                 messagebox.showerror("错误", "请输入 GitHub 用户名")
                 return
-            if not base_dir:
-                messagebox.showerror("错误", "请选择本地目录")
+            token = self.token_var.get().strip() or None
+
+            self.output_text.delete(1.0, tk.END)
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+            self.repo_items.clear()
+            self.repo_infos.clear()
+
+            def fetch_thread():
+                try:
+                    repos = get_user_repos(username, token)
+                except Exception as e:
+                    self.output_queue.put(("log", f"错误: {e}"))
+                    self.output_queue.put(("fetch_done", None))
+                    return
+
+                self.output_queue.put(("log", f"共找到 {len(repos)} 个仓库"))
+                self.output_queue.put(("repos_list", repos))
+                self.output_queue.put(("fetch_done", None))
+
+            self.is_running = True
+            self.update_button_states()
+            thread = threading.Thread(target=fetch_thread)
+            thread.daemon = True
+            thread.start()
+
+        def populate_repo_list(self, repos):
+            for repo in repos:
+                name = repo["name"]
+                self.repo_infos[name] = repo
+                item_id = self.tree.insert("", "end", text=name, values=("等待",))
+                self.repo_items[name] = item_id
+                self.tree.selection_add(item_id)
+            self.update_button_states()
+
+        # ---------- 开始同步 ----------
+        def start_sync(self):
+            if self.is_running:
                 return
+            selected = self.tree.selection()
+            if not selected:
+                messagebox.showinfo("提示", "没有选中的仓库。")
+                return
+
+            selected_names = [self.tree.item(item, "text") for item in selected]
+
+            base_dir = self.dir_var.get().strip()
+            token = self.token_var.get().strip() or None
             if not os.path.exists(base_dir):
                 try:
                     os.makedirs(base_dir)
@@ -448,50 +589,170 @@ def main_gui():
                     messagebox.showerror("错误", f"无法创建目录: {e}")
                     return
 
-            # 清空界面
-            self.output_text.delete(1.0, tk.END)
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            self.repo_items.clear()
-            self.repo_status.clear()
+            self.stop_event.clear()
+            self.is_running = True
+            self.update_button_states()
+            mode = self.mode_var.get()
 
-            # 禁用控件
-            self.set_controls_state("disabled")
+            def sync_thread():
+                def status_cb(name, status):
+                    self.status_queue.put((name, status))
+                def out_cb(msg):
+                    self.output_queue.put(("log", msg))
+                # 进度回调，发送到 output_queue 特殊类型
+                def prog_cb(filename, downloaded, total):
+                    self.output_queue.put(("progress", filename, downloaded, total))
 
-            # 启动线程
-            thread = threading.Thread(target=self.sync_thread, args=(username, base_dir, token))
+                repos_to_process = [self.repo_infos[name] for name in selected_names if name in self.repo_infos]
+                self.output_queue.put(("log", f"开始处理 {len(repos_to_process)} 个选中的仓库..."))
+
+                for repo in repos_to_process:
+                    if self.stop_event.is_set():
+                        self.output_queue.put(("log", "用户停止，剩余未处理仓库将被标记为失败。"))
+                        break
+                    if mode in ("code", "both"):
+                        clone_or_pull(repo, base_dir,
+                                      status_callback=status_cb,
+                                      output_callback=out_cb,
+                                      stop_event=self.stop_event)
+                    if mode in ("release", "both"):
+                        if not self.stop_event.is_set():
+                            success = download_latest_release(
+                                repo, base_dir, token,
+                                output_callback=out_cb,
+                                progress_callback=prog_cb
+                            )
+                            if mode == "release":
+                                status_cb(repo["name"], "成功" if success else "失败")
+                self.output_queue.put(("sync_done", None))
+
+            thread = threading.Thread(target=sync_thread)
             thread.daemon = True
             thread.start()
 
-        def sync_thread(self, username, base_dir, token):
-            def status_callback(repo_name, status):
-                self.status_queue.put((repo_name, status))
-            def output_callback(msg):
-                self.output_queue.put(("log", msg))
+        # ---------- 停止同步 ----------
+        def stop_sync(self):
+            self.stop_event.set()
+            self.output_queue.put(("log", "正在停止..."))
+            for item in self.tree.get_children():
+                status = self.tree.item(item, "values")[0]
+                if status in ("等待", "处理中"):
+                    self.tree.item(item, values=("失败",))
+                    self.tree.tag_configure("fail", foreground="red")
+                    self.tree.item(item, tags=("fail",))
+            self.reset_progress_bar()
 
-            process_repos(username, base_dir, token,
-                          status_callback=status_callback,
-                          output_callback=output_callback)
+        # ---------- 重试失败 ----------
+        def retry_failed(self):
+            if self.is_running:
+                return
+            failed_items = [item for item in self.tree.get_children()
+                            if self.tree.item(item, "values")[0] == "失败"]
+            if not failed_items:
+                messagebox.showinfo("提示", "没有失败的仓库需要重试。")
+                return
 
-            self.output_queue.put(("done", None))
+            base_dir = self.dir_var.get().strip()
+            token = self.token_var.get().strip() or None
+            if not os.path.exists(base_dir):
+                messagebox.showerror("错误", "本地目录不存在")
+                return
 
+            self.stop_event.clear()
+            self.is_running = True
+            self.update_button_states()
+            mode = self.mode_var.get()
+
+            def retry_thread():
+                def status_cb(name, status):
+                    self.status_queue.put((name, status))
+                def out_cb(msg):
+                    self.output_queue.put(("log", msg))
+                def prog_cb(filename, downloaded, total):
+                    self.output_queue.put(("progress", filename, downloaded, total))
+
+                failed_names = [self.tree.item(item, "text") for item in failed_items]
+                repos_to_retry = [self.repo_infos[name] for name in failed_names if name in self.repo_infos]
+
+                for repo in repos_to_retry:
+                    if self.stop_event.is_set():
+                        self.output_queue.put(("log", "用户停止，剩余未重试仓库仍视为失败。"))
+                        break
+                    if mode in ("code", "both"):
+                        clone_or_pull(repo, base_dir,
+                                      status_callback=status_cb,
+                                      output_callback=out_cb,
+                                      stop_event=self.stop_event)
+                    if mode in ("release", "both"):
+                        if not self.stop_event.is_set():
+                            success = download_latest_release(
+                                repo, base_dir, token,
+                                output_callback=out_cb,
+                                progress_callback=prog_cb
+                            )
+                            if mode == "release":
+                                status_cb(repo["name"], "成功" if success else "失败")
+                self.output_queue.put(("sync_done", None))
+
+            thread = threading.Thread(target=retry_thread)
+            thread.daemon = True
+            thread.start()
+
+        # ---------- 进度条控制 ----------
+        def reset_progress_bar(self):
+            self.progress_bar.stop()
+            self.progress_bar['value'] = 0
+            self.progress_bar['maximum'] = 100
+            self.progress_bar['mode'] = 'determinate'
+            self.progress_label['text'] = "下载进度："
+
+        def handle_progress(self, filename, downloaded, total):
+            """主线程中更新进度条"""
+            if downloaded == -1 and total == -1:
+                # 文件已存在或错误，重置进度条
+                self.reset_progress_bar()
+                return
+            if filename is None:
+                # 当前仓库 Release 下载完成
+                self.reset_progress_bar()
+                return
+
+            # 更新标签显示当前文件名
+            short_name = filename if len(filename) < 30 else filename[:27]+"..."
+            self.progress_label['text'] = f"下载进度：{short_name}"
+
+            if total > 0:
+                self.progress_bar['mode'] = 'determinate'
+                self.progress_bar['maximum'] = total
+                self.progress_bar['value'] = downloaded
+            else:
+                # 未知大小，使用脉冲模式
+                self.progress_bar['mode'] = 'indeterminate'
+                self.progress_bar.start(10)
+
+        # ---------- UI 更新循环 ----------
         def update_ui(self):
-            """定期从队列获取数据更新界面"""
             try:
                 while True:
                     item = self.output_queue.get_nowait()
-                    if isinstance(item, tuple) and item[0] == "done":
-                        # 同步完成，重新获取配置状态并启用控件
-                        self.update_config_status()
-                        self.set_controls_state("normal")
-                        break
-                    elif isinstance(item, tuple) and item[0] == "log":
-                        msg = item[1]
-                        self.output_text.insert(tk.END, msg + "\n")
-                        self.output_text.see(tk.END)
-                    else:
-                        self.output_text.insert(tk.END, item + "\n")
-                        self.output_text.see(tk.END)
+                    if isinstance(item, tuple):
+                        msg_type = item[0]
+                        if msg_type == "log":
+                            self.output_text.insert(tk.END, item[1] + "\n")
+                            self.output_text.see(tk.END)
+                        elif msg_type == "repos_list":
+                            self.populate_repo_list(item[1])
+                        elif msg_type == "fetch_done":
+                            self.is_running = False
+                            self.update_button_states()
+                        elif msg_type == "sync_done":
+                            self.is_running = False
+                            self.update_button_states()
+                            self.mark_remaining_as_failed()
+                            self.reset_progress_bar()
+                        elif msg_type == "progress":
+                            _, filename, downloaded, total = item
+                            self.handle_progress(filename, downloaded, total)
             except queue.Empty:
                 pass
 
@@ -504,29 +765,34 @@ def main_gui():
 
             self.root.after(100, self.update_ui)
 
+        def mark_remaining_as_failed(self):
+            for item in self.tree.get_children():
+                cur_status = self.tree.item(item, "values")[0]
+                if cur_status in ("等待", "处理中"):
+                    self.tree.item(item, values=("失败",))
+                    self.tree.item(item, tags=("fail",))
+                    self.tree.tag_configure("fail", foreground="red")
+
         def update_repo_status(self, repo_name, status):
-            if repo_name not in self.repo_items:
-                item_id = self.tree.insert("", "end", text=repo_name, values=(status,))
-                self.repo_items[repo_name] = item_id
-            else:
+            if repo_name in self.repo_items:
                 item_id = self.repo_items[repo_name]
                 self.tree.item(item_id, values=(status,))
-
-            if status == "成功":
-                self.tree.tag_configure("success", foreground="green")
-                self.tree.item(item_id, tags=("success",))
-            elif status in ("失败", "跳过"):
-                self.tree.tag_configure("fail", foreground="red")
-                self.tree.item(item_id, tags=("fail",))
-            elif status == "处理中":
-                self.tree.tag_configure("processing", foreground="blue")
-                self.tree.item(item_id, tags=("processing",))
+                if status == "成功":
+                    self.tree.tag_configure("success", foreground="green")
+                    self.tree.item(item_id, tags=("success",))
+                elif status in ("失败", "跳过"):
+                    self.tree.tag_configure("fail", foreground="red")
+                    self.tree.item(item_id, tags=("fail",))
+                elif status == "处理中":
+                    self.tree.tag_configure("processing", foreground="blue")
+                    self.tree.item(item_id, tags=("processing",))
+                else:
+                    self.tree.item(item_id, tags=())
 
     root = tk.Tk()
     app = GitHubClonerApp(root)
     root.mainloop()
 
-# -------------------- 入口 --------------------
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         main_gui()
