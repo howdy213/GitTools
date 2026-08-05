@@ -2,8 +2,8 @@
 """
 GitHub 仓库批量克隆/拉取工具
 - 命令行模式：python script.py <username> [--dir DIR] [--token TOKEN] [--color]
-              [--mode {code,release,both}]  [--releases]  (--releases 等效于 --mode both)
-- GUI 模式：python GitBackup.pyw
+              [--mode {code,release,both}]  [--releases]
+- GUI 模式：python script.py（不带参数启动图形界面）
 """
 
 import os
@@ -17,7 +17,7 @@ import threading
 import queue
 from urllib.parse import urlparse
 
-# -------------------- 颜色支持（仅命令行）--------------------
+# -------------------- 颜色支持--------------------
 class Colors:
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'
@@ -110,22 +110,34 @@ def get_latest_release_assets(full_name, token=None):
         assets.append({
             "name": name,
             "download_url": asset["browser_download_url"],
-            "size": asset.get("size", 0)  # 用于预估进度条最大值
+            "size": asset.get("size", 0)
         })
     return assets
 
-def download_asset(url, save_path, output_callback=None, progress_callback=None):
+def download_asset(url, save_path, expected_size=0, output_callback=None, progress_callback=None):
     """
-    分块下载文件，支持进度回调。
-    progress_callback(bytes_downloaded, total_bytes) 若无 total_bytes 则 total_bytes 为 0
+    分块下载文件，支持进度回调与更新判断（基于文件大小）。
+    expected_size: 远程文件期望大小，0 表示未知。
     """
+    # 检查本地文件，如果存在且大小匹配则跳过
     if os.path.exists(save_path):
-        if output_callback:
-            output_callback(f"  已存在，跳过: {os.path.basename(save_path)}")
-        if progress_callback:
-            # 快速完成通知
-            progress_callback(-1, -1)  # 信号：文件已存在，可隐藏进度条
-        return True
+        local_size = os.path.getsize(save_path)
+        if expected_size > 0 and local_size == expected_size:
+            if output_callback:
+                output_callback(f"  文件已存在且大小一致，跳过: {os.path.basename(save_path)}")
+            if progress_callback:
+                progress_callback(-1, -1)  # 信号：跳过
+            return True
+        elif expected_size == 0:
+            # 无大小信息时，文件名存在即跳过
+            if output_callback:
+                output_callback(f"  已存在，跳过: {os.path.basename(save_path)}")
+            if progress_callback:
+                progress_callback(-1, -1)
+            return True
+        else:
+            if output_callback:
+                output_callback(f"  文件大小不一致，重新下载: {os.path.basename(save_path)} (本地 {local_size}, 远程 {expected_size})")
 
     if output_callback:
         output_callback(f"  下载: {os.path.basename(save_path)}")
@@ -150,17 +162,16 @@ def download_asset(url, save_path, output_callback=None, progress_callback=None)
         with open(save_path, 'wb') as f:
             f.write(data)
         if progress_callback:
-            progress_callback(downloaded, total_size)  # 确保最终 100%
+            progress_callback(downloaded, total_size)
         return True
     except Exception as e:
         if output_callback:
             output_callback(f"  下载失败: {e}")
         if progress_callback:
-            progress_callback(-1, -1)  # 错误信号
+            progress_callback(-1, -1)
         return False
 
 def download_latest_release(repo_info, base_dir, token=None, output_callback=None, progress_callback=None):
-    """下载仓库最新 Release 的非源码附件，统一保存到 base_dir/Release/仓库名/"""
     repo_name = repo_info["name"]
     full_name = repo_info.get("full_name")
     if not full_name:
@@ -180,7 +191,6 @@ def download_latest_release(repo_info, base_dir, token=None, output_callback=Non
             output_callback("  无符合条件的附件")
         return True
 
-    # 一次性展示所有待下载文件名
     if output_callback:
         output_callback("  附件列表：")
         for i, asset in enumerate(assets, 1):
@@ -190,18 +200,17 @@ def download_latest_release(repo_info, base_dir, token=None, output_callback=Non
     all_ok = True
     for asset in assets:
         save_path = os.path.join(release_dir, asset["name"])
-        # 包装进度回调，传递当前 asset 信息
         def asset_progress(downloaded, total):
             if progress_callback:
                 progress_callback(asset["name"], downloaded, total)
         ok = download_asset(asset["download_url"], save_path,
+                            expected_size=asset["size"],
                             output_callback=output_callback,
                             progress_callback=asset_progress)
         if not ok:
             all_ok = False
-    # 所有文件处理完后，重置进度条
     if progress_callback:
-        progress_callback(None, -1, -1)  # 特殊信号：结束
+        progress_callback(None, -1, -1)
     return all_ok
 
 def run_git_command(cmd, cwd=None, output_callback=None):
@@ -321,9 +330,8 @@ def main_gui():
         def __init__(self, root):
             self.root = root
             self.root.title("GitHub 仓库批量克隆/拉取工具")
-            self.root.geometry("850x750")  # 增加高度以容纳进度条
+            self.root.geometry("850x750")
 
-            # 变量
             self.username_var = tk.StringVar()
             self.dir_var = tk.StringVar(value=os.getcwd())
             self.token_var = tk.StringVar()
@@ -331,7 +339,6 @@ def main_gui():
             self.safe_dir_var = tk.BooleanVar(value=False)
             self.ssl_verify_var = tk.BooleanVar(value=True)
 
-            # 仓库数据与控件映射
             self.repo_infos = {}
             self.repo_items = {}
             self.stop_event = threading.Event()
@@ -341,13 +348,11 @@ def main_gui():
             self.update_config_status()
             self.update_button_states()
 
-            # 线程通信
             self.output_queue = queue.Queue()
             self.status_queue = queue.Queue()
             self.update_ui()
 
         def create_widgets(self):
-            # ---------- 设置区域 ----------
             input_frame = ttk.LabelFrame(self.root, text="设置", padding=5)
             input_frame.pack(fill="x", padx=5, pady=5)
 
@@ -361,14 +366,12 @@ def main_gui():
             ttk.Label(input_frame, text="Token (可选):").grid(row=2, column=0, sticky="w", padx=5, pady=5)
             ttk.Entry(input_frame, textvariable=self.token_var, width=40, show="*").grid(row=2, column=1, padx=5, pady=5, sticky="we")
 
-            # 模式选择
             mode_frame = ttk.LabelFrame(input_frame, text="操作模式", padding=5)
             mode_frame.grid(row=3, column=1, sticky="w", padx=5, pady=5)
             ttk.Radiobutton(mode_frame, text="仅代码", variable=self.mode_var, value="code").pack(side="left", padx=5)
             ttk.Radiobutton(mode_frame, text="仅 Release", variable=self.mode_var, value="release").pack(side="left", padx=5)
             ttk.Radiobutton(mode_frame, text="代码 + Release", variable=self.mode_var, value="both").pack(side="left", padx=5)
 
-            # 按钮控制栏
             btn_frame = ttk.Frame(input_frame)
             btn_frame.grid(row=4, column=1, pady=10, sticky="w")
             self.fetch_button = ttk.Button(btn_frame, text="获取仓库列表", command=self.fetch_repos)
@@ -380,7 +383,6 @@ def main_gui():
             self.retry_button = ttk.Button(btn_frame, text="重试失败", command=self.retry_failed, state="disabled")
             self.retry_button.pack(side="left", padx=5)
 
-            # ---------- Git 配置区域 ----------
             config_frame = ttk.LabelFrame(self.root, text="Git 全局配置", padding=5)
             config_frame.pack(fill="x", padx=5, pady=5)
 
@@ -394,11 +396,9 @@ def main_gui():
                 variable=self.ssl_verify_var, command=self.on_ssl_verify_toggle)
             self.ssl_verify_cb.grid(row=1, column=0, sticky="w", padx=5, pady=2)
 
-            # ---------- 主面板 ----------
             main_panel = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
             main_panel.pack(fill="both", expand=True, padx=5, pady=5)
 
-            # 左侧仓库列表
             list_frame = ttk.LabelFrame(main_panel, text="仓库列表")
             main_panel.add(list_frame, weight=1)
 
@@ -420,7 +420,6 @@ def main_gui():
             tree_scroll.pack(side="right", fill="y")
             self.tree.pack(side="left", fill="both", expand=True)
 
-            # 右侧日志 + 进度条
             right_frame = ttk.Frame(main_panel)
             main_panel.add(right_frame, weight=2)
 
@@ -429,7 +428,6 @@ def main_gui():
             self.output_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD)
             self.output_text.pack(fill="both", expand=True)
 
-            # 进度条区域
             progress_frame = ttk.Frame(right_frame)
             progress_frame.pack(fill="x", pady=5)
             self.progress_label = ttk.Label(progress_frame, text="下载进度：")
@@ -462,7 +460,6 @@ def main_gui():
                 self.stop_button.config(state="disabled")
                 self.retry_button.config(state="normal" if has_list else "disabled")
 
-        # ---------- 配置相关 ----------
         def update_config_status(self):
             try:
                 result = subprocess.run(
@@ -528,7 +525,6 @@ def main_gui():
             finally:
                 self.set_config_controls_state("normal")
 
-        # ---------- 获取仓库列表 ----------
         def fetch_repos(self):
             username = self.username_var.get().strip()
             if not username:
@@ -549,7 +545,6 @@ def main_gui():
                     self.output_queue.put(("log", f"错误: {e}"))
                     self.output_queue.put(("fetch_done", None))
                     return
-
                 self.output_queue.put(("log", f"共找到 {len(repos)} 个仓库"))
                 self.output_queue.put(("repos_list", repos))
                 self.output_queue.put(("fetch_done", None))
@@ -569,7 +564,6 @@ def main_gui():
                 self.tree.selection_add(item_id)
             self.update_button_states()
 
-        # ---------- 开始同步 ----------
         def start_sync(self):
             if self.is_running:
                 return
@@ -579,7 +573,6 @@ def main_gui():
                 return
 
             selected_names = [self.tree.item(item, "text") for item in selected]
-
             base_dir = self.dir_var.get().strip()
             token = self.token_var.get().strip() or None
             if not os.path.exists(base_dir):
@@ -599,7 +592,6 @@ def main_gui():
                     self.status_queue.put((name, status))
                 def out_cb(msg):
                     self.output_queue.put(("log", msg))
-                # 进度回调，发送到 output_queue 特殊类型
                 def prog_cb(filename, downloaded, total):
                     self.output_queue.put(("progress", filename, downloaded, total))
 
@@ -630,7 +622,6 @@ def main_gui():
             thread.daemon = True
             thread.start()
 
-        # ---------- 停止同步 ----------
         def stop_sync(self):
             self.stop_event.set()
             self.output_queue.put(("log", "正在停止..."))
@@ -642,7 +633,6 @@ def main_gui():
                     self.tree.item(item, tags=("fail",))
             self.reset_progress_bar()
 
-        # ---------- 重试失败 ----------
         def retry_failed(self):
             if self.is_running:
                 return
@@ -698,7 +688,6 @@ def main_gui():
             thread.daemon = True
             thread.start()
 
-        # ---------- 进度条控制 ----------
         def reset_progress_bar(self):
             self.progress_bar.stop()
             self.progress_bar['value'] = 0
@@ -707,17 +696,13 @@ def main_gui():
             self.progress_label['text'] = "下载进度："
 
         def handle_progress(self, filename, downloaded, total):
-            """主线程中更新进度条"""
             if downloaded == -1 and total == -1:
-                # 文件已存在或错误，重置进度条
                 self.reset_progress_bar()
                 return
             if filename is None:
-                # 当前仓库 Release 下载完成
                 self.reset_progress_bar()
                 return
 
-            # 更新标签显示当前文件名
             short_name = filename if len(filename) < 30 else filename[:27]+"..."
             self.progress_label['text'] = f"下载进度：{short_name}"
 
@@ -726,11 +711,9 @@ def main_gui():
                 self.progress_bar['maximum'] = total
                 self.progress_bar['value'] = downloaded
             else:
-                # 未知大小，使用脉冲模式
                 self.progress_bar['mode'] = 'indeterminate'
                 self.progress_bar.start(10)
 
-        # ---------- UI 更新循环 ----------
         def update_ui(self):
             try:
                 while True:
